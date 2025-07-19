@@ -15,7 +15,7 @@ if not exist "package.json" (
     exit /b 1
 )
 
-findstr "local-mcp-hub" package.json >nul 2>&1
+findstr "local-mcp-hub" package.json >NUL 2>&1
 if errorlevel 1 (
     echo ❌ Please run this script from the local-mcp-hub directory
     pause
@@ -31,7 +31,7 @@ echo 🔍 Checking dependencies...
 
 :: Check for git
 echo    Checking Git...
-git --version >nul
+git --version >NUL
 if errorlevel 1 (
     echo ❌ Git is required but not installed
     echo Please install Git from https://git-scm.com/download/win
@@ -42,7 +42,7 @@ echo ✅ Git found
 
 :: Check for node
 echo    Checking Node.js...
-node --version >nul
+node --version >NUL
 if errorlevel 1 (
     echo ❌ Node.js is required but not installed
     echo Please install Node.js from https://nodejs.org
@@ -54,7 +54,7 @@ echo ✅ Node.js found
 :: Check for npm
 echo    Checking npm...
 set NPM_CONFIG_SHELL=cmd.exe
-call npm --version >nul 2>&1 || (
+call npm --version >NUL 2>&1 || (
     echo ❌ npm is required but not installed
     pause
     exit /b 1
@@ -63,7 +63,7 @@ echo ✅ npm found
 
 :: Check for python
 echo    Checking Python...
-python --version >nul
+python --version >NUL
 if errorlevel 1 (
     echo ❌ Python 3 is required but not installed
     echo Please install Python from https://python.org
@@ -74,11 +74,11 @@ echo ✅ Python found
 
 :: Check for uv (Python package manager)
 echo    Checking uv...
-python -m uv --version >nul
+python -m uv --version >NUL
 if errorlevel 1 (
     echo ⚠️  uv not found, installing via pip...
-    pip install --user uv >nul
-    python -m uv --version >nul
+    pip install --user uv >NUL
+    python -m uv --version >NUL
     if errorlevel 1 (
         echo ❌ Failed to install uv
         pause
@@ -218,4 +218,4 @@ echo    3. Run 'npm start' to start the hub
 echo    4. Test with: curl http://localhost:3002/health
 echo.
 echo Press any key to continue...
-pause >nul
+pause >NUL
