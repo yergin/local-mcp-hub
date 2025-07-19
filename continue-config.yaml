@@ -15,6 +15,9 @@ models:
       - edit
       - apply
       - autocomplete
+    capabilities:
+      - tool_use
+    supportsToolUse: true
     defaultCompletionOptions:
       temperature: 0.2
       maxTokens: 4000

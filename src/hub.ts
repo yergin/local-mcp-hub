@@ -481,7 +481,9 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
           id: this.config.ollama.model,
           object: 'model',
           created: Math.floor(Date.now() / 1000),
-          owned_by: 'local-mcp-hub'
+          owned_by: 'local-mcp-hub',
+          capabilities: ['tool_use', 'function_calling'],
+          supports_tools: true
         }]
       });
     });
