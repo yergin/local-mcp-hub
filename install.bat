@@ -2,6 +2,9 @@
 :: Local MCP Hub Installer for Windows
 :: Downloads and sets up Serena and Context7 MCPs for local development
 
+:: Fix npm shell issues in mixed environments
+set NPM_CONFIG_SHELL=cmd.exe
+
 echo 🚀 Local MCP Hub Installer (Windows)
 echo ==================================
 
@@ -28,7 +31,7 @@ echo 🔍 Checking dependencies...
 
 :: Check for git
 echo    Checking Git...
-git --version >nul 2>&1
+git --version >nul
 if errorlevel 1 (
     echo ❌ Git is required but not installed
     echo Please install Git from https://git-scm.com/download/win
@@ -39,7 +42,7 @@ echo ✅ Git found
 
 :: Check for node
 echo    Checking Node.js...
-node --version >nul 2>&1
+node --version >nul
 if errorlevel 1 (
     echo ❌ Node.js is required but not installed
     echo Please install Node.js from https://nodejs.org
@@ -50,8 +53,8 @@ echo ✅ Node.js found
 
 :: Check for npm
 echo    Checking npm...
-npm --version >nul 2>&1
-if errorlevel 1 (
+set NPM_CONFIG_SHELL=cmd.exe
+call npm --version >nul 2>&1 || (
     echo ❌ npm is required but not installed
     pause
     exit /b 1
@@ -60,7 +63,7 @@ echo ✅ npm found
 
 :: Check for python
 echo    Checking Python...
-python --version >nul 2>&1
+python --version >nul
 if errorlevel 1 (
     echo ❌ Python 3 is required but not installed
     echo Please install Python from https://python.org
@@ -71,11 +74,11 @@ echo ✅ Python found
 
 :: Check for uv (Python package manager)
 echo    Checking uv...
-python -m uv --version >nul 2>&1
+python -m uv --version >nul
 if errorlevel 1 (
     echo ⚠️  uv not found, installing via pip...
-    pip install --user uv >nul 2>&1
-    python -m uv --version >nul 2>&1
+    pip install --user uv >nul
+    python -m uv --version >nul
     if errorlevel 1 (
         echo ❌ Failed to install uv
         pause
@@ -150,6 +153,7 @@ cd ..
 echo 🔧 Setting up Context7...
 cd context7
 echo    Installing Context7 dependencies...
+set NPM_CONFIG_SHELL=cmd.exe
 call npm install
 if errorlevel 1 (
     echo ❌ Failed to install Context7 dependencies
@@ -159,6 +163,7 @@ if errorlevel 1 (
 )
 if not exist "dist" (
     echo    Building Context7...
+    set NPM_CONFIG_SHELL=cmd.exe
     call npm run build
     if errorlevel 1 (
         echo ❌ Failed to build Context7
