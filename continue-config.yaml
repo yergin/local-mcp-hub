@@ -1,0 +1,30 @@
+# Continue Extension Configuration for Local MCP Hub
+# Place this content in your Continue extension config.yaml file
+
+models:
+  - name: "Local MCP Hub + Qwen2.5"
+    provider: openai
+    model: "qwen2.5:latest" 
+    apiBase: "http://localhost:3002/v1"
+    apiKey: "dummy-key"
+    requestOptions:
+      headers:
+        "User-Agent": "Continue-VSCode"
+    roles:
+      - chat
+      - edit
+      - apply
+    defaultCompletionOptions:
+      temperature: 0.7
+      maxTokens: 4000
+
+contextProviders:
+  - name: http
+    params:
+      url: "http://localhost:3002/health"
+      description: "Local MCP Hub Health Check"
+
+allowAnonymousTelemetry: false
+
+# Available Tools: (will be populated as MCPs are added)
+# Currently: None (basic Ollama connection only)

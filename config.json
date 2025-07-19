@@ -1,0 +1,14 @@
+{
+  "ollama": {
+    "host": "http://10.0.0.24:11434",
+    "model": "qwen2.5:latest"
+  },
+  "hub": {
+    "port": 3002,
+    "log_level": "info",
+    "cors_origins": ["*"]
+  },
+  "mcps": {
+    "enabled": ["serena", "context7"]
+  }
+}
