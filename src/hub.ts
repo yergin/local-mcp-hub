@@ -4,6 +4,7 @@ import winston from 'winston';
 import fs from 'fs';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
+import { CompletionHandler } from './completions';
 
 // Configuration interface
 interface Config {
@@ -260,23 +261,13 @@ class LocalMCPHub {
           return res.status(400).json({ error: 'Prompt is required' });
         }
 
-        // Hard-coded suggestions based on context
-        let suggestion = '';
+        // Parse FIM request and create context-aware completion
+        const fimRequest = CompletionHandler.parseFIMRequest(prompt);
+        const context = CompletionHandler.createCompletionContext(fimRequest.prefix, fimRequest.suffix);
+        const completionPrompt = CompletionHandler.createCompletionPrompt(context);
         
-        if (prompt.includes('function fibonacci')) {
-          suggestion = '(n: number): number {\n    if (n <= 1) return n;\n    return fibonacci(n - 1) + fibonacci(n - 2);\n}';
-        } else if (prompt.includes('<fim_middle>')) {
-          // FIM (Fill-In-Middle) request
-          if (prompt.includes('function')) {
-            suggestion = '(n: number): number';
-          } else if (prompt.includes('const')) {
-            suggestion = ' = "hello world";';
-          } else {
-            suggestion = '\n    // TODO: implement';
-          }
-        } else {
-          suggestion = '\n    // Auto-generated suggestion';
-        }
+        // Get completion from Ollama
+        const suggestion = await this.sendToOllama(completionPrompt, temperature, Math.min(max_tokens, 100));
 
         if (stream) {
           // Handle streaming for autocomplete
