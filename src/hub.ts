@@ -283,9 +283,9 @@ class LocalMCPHub {
         const projectContext = lines.slice(0, -1).join('\n');
 
         // Create context-aware completion prompt
-        const completionPrompt = `You are a code completion assistant. Complete the code at the cursor position.
+        const completionPrompt = `You are a code completion assistant. Complete the code at the cursor position. Do not add explanations and respond in plain text starting with the code said to be shown before the cursor character-for-character as your text will replace the code directly.
 
-PROJECT CONTEXT (for language/framework detection):
+PROJECT CONTEXT (only provided for you to quickly guess the language/framework):
 ${projectContext}
 
 CODE IMMEDIATELY BEFORE CURSOR:
@@ -294,12 +294,18 @@ ${codeBeforeCursor}
 CODE AFTER CURSOR (suffix):
 ${fimRequest.suffix}
 
-TASK: Complete the code starting from the cursor position. Your response must include the suffix "${fimRequest.suffix}" and can continue beyond it with appropriate code completion.
+TASK: Complete the code making sure to include the suffix "${fimRequest.suffix}" and continue beyond it with appropriate code completion as you see fit.
 
 COMPLETION:`;
 
         // Get completion from Ollama using full context
-        const suggestion = await this.sendToOllama(completionPrompt, temperature, Math.min(max_tokens, 150));
+        const rawSuggestion = await this.sendToOllama(completionPrompt, temperature, Math.min(max_tokens, 150));
+        
+        // Trim the prefix from the response to get just the completion
+        let suggestion = rawSuggestion;
+        if (rawSuggestion.startsWith(codeBeforeCursor)) {
+          suggestion = rawSuggestion.slice(codeBeforeCursor.length);
+        }
 
         if (stream) {
           // Handle streaming for autocomplete
