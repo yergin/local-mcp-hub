@@ -106,7 +106,7 @@ if [ ! -d ".venv" ]; then
     uv venv
 fi
 echo "   Installing Serena dependencies..."
-uv pip install -e .
+uv pip install -e . --python .venv/bin/python
 cd ..
 
 # Set up Context7
