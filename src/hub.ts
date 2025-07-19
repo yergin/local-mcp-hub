@@ -12,6 +12,35 @@ interface FIMRequest {
   isFIM: boolean;
 }
 
+// OpenAI Tool interfaces
+interface OpenAITool {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: 'object';
+      properties: Record<string, any>;
+      required?: string[];
+    };
+  };
+}
+
+interface ToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+interface ToolMessage {
+  role: 'tool';
+  content: string;
+  tool_call_id: string;
+}
+
 interface CompletionContext {
   prefix: string;
   suffix: string;
@@ -138,16 +167,76 @@ class LocalMCPHub {
         logger.info('Received chat completion request');
         logger.debug('Request body:', JSON.stringify(req.body, null, 2));
         
-        const { messages, model, temperature = 0.7, max_tokens = 4000, stream = false } = req.body;
+        const { messages, model, temperature = 0.7, max_tokens = 4000, stream = false, tools, tool_choice } = req.body;
         
         if (!messages || !Array.isArray(messages)) {
           return res.status(400).json({ error: 'Invalid messages format' });
         }
 
-        // Convert OpenAI messages to Ollama format
-        const basePrompt = this.convertMessagesToPrompt(messages);
+        // Check if this is a tool call response (messages contain tool results)
+        const hasToolResults = messages.some(msg => msg.role === 'tool');
         
-        // Enhance prompt with MCP tools if needed
+        if (hasToolResults) {
+          // Generate final response using tool results
+          const response = await this.generateResponseWithToolResults(messages, temperature, max_tokens);
+          
+          const openaiResponse = {
+            id: `chatcmpl-${Date.now()}`,
+            object: 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: this.config.ollama.model,
+            choices: [{
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: response
+              },
+              finish_reason: 'stop'
+            }]
+          };
+          
+          return res.json(openaiResponse);
+        }
+        
+        // Check if tools are available and let LLM decide whether to use them
+        if (tools && tools.length > 0) {
+          logger.info(`Tools available: ${tools.length} tools found`);
+          logger.debug('Available tools:', tools.map((t: OpenAITool) => t.function.name));
+          const toolSelection = await this.selectToolWithLLM(messages, tools);
+          
+          if (toolSelection) {
+            // Return tool call response
+            const toolCallId = `call_${Date.now()}`;
+            
+            const openaiResponse = {
+              id: `chatcmpl-${Date.now()}`,
+              object: 'chat.completion',
+              created: Math.floor(Date.now() / 1000),
+              model: this.config.ollama.model,
+              choices: [{
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: null,
+                  tool_calls: [{
+                    id: toolCallId,
+                    type: 'function',
+                    function: {
+                      name: toolSelection.tool,
+                      arguments: JSON.stringify(toolSelection.args)
+                    }
+                  }]
+                },
+                finish_reason: 'tool_calls'
+              }]
+            };
+            
+            return res.json(openaiResponse);
+          }
+        }
+        
+        // No tools needed, generate normal response
+        const basePrompt = this.convertMessagesToPrompt(messages);
         const prompt = await this.enhancePromptWithTools(basePrompt);
         
         if (stream) {
@@ -624,6 +713,92 @@ ${hubContent.substring(0, 1000)}...
     }
     
     return methods.slice(0, 10); // Limit to first 10 methods
+  }
+
+  private async selectToolWithLLM(messages: any[], tools: OpenAITool[]): Promise<{tool: string, args: any} | null> {
+    const lastMessage = messages[messages.length - 1];
+    const userRequest = lastMessage.content;
+    
+    // Create tool descriptions for the LLM
+    const toolDescriptions = tools.map(tool => {
+      const params = Object.entries(tool.function.parameters.properties || {})
+        .map(([name, schema]: [string, any]) => `${name}: ${schema.description || schema.type}`)
+        .join(', ');
+      
+      return `- ${tool.function.name}(${params}): ${tool.function.description}`;
+    }).join('\n');
+    
+    const toolSelectionPrompt = `You are a helpful assistant that can use tools to help users. 
+
+User request: "${userRequest}"
+
+Available tools:
+${toolDescriptions}
+
+Analyze the user's request and determine if any tool should be used. If a tool should be used:
+1. Choose the most appropriate tool
+2. Extract the necessary arguments from the user's request
+3. Respond with JSON in this exact format: {"tool": "tool_name", "args": {"param": "value"}}
+
+If no tool is needed, respond with: {"tool": null}
+
+IMPORTANT: 
+- Only use tools when the user is explicitly asking for file operations, code analysis, or workspace information
+- Extract file paths, patterns, or directory names from the user's message
+- For file paths, use relative paths from the current workspace
+- Respond with ONLY the JSON, no other text
+
+Response:`;
+    
+    try {
+      const response = await this.sendToOllama(toolSelectionPrompt, 0.1, 200);
+      
+      // Clean up the response and try to parse JSON
+      const cleanResponse = response.trim().replace(/```json|```/g, '').trim();
+      
+      logger.info(`Tool selection response: ${cleanResponse}`);
+      
+      const selection = JSON.parse(cleanResponse);
+      
+      if (selection.tool && selection.tool !== null) {
+        // Validate that the selected tool exists
+        const selectedTool = tools.find(t => t.function.name === selection.tool);
+        if (selectedTool) {
+          logger.info(`LLM selected tool: ${selection.tool} with args:`, selection.args);
+          return { tool: selection.tool, args: selection.args || {} };
+        } else {
+          logger.warn(`LLM selected non-existent tool: ${selection.tool}`);
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      logger.error('Error in LLM tool selection:', error);
+      return null;
+    }
+  }
+
+  private async generateResponseWithToolResults(
+    messages: any[], 
+    temperature: number, 
+    maxTokens: number
+  ): Promise<string> {
+    // Find the tool results in the messages
+    const toolResults = messages.filter(msg => msg.role === 'tool');
+    const userMessages = messages.filter(msg => msg.role !== 'tool');
+    
+    // Create a prompt that includes the tool results
+    let prompt = this.convertMessagesToPrompt(userMessages);
+    
+    if (toolResults.length > 0) {
+      prompt += '\n\nTool Results:\n';
+      toolResults.forEach((result, index) => {
+        prompt += `Result ${index + 1}: ${result.content}\n`;
+      });
+      prompt += '\nBased on the tool results above, provide a helpful and accurate response to the user. Summarize the information clearly and answer their question.';
+    }
+    
+    return await this.sendToOllama(prompt, temperature, maxTokens);
   }
 
   // Completion handler methods
