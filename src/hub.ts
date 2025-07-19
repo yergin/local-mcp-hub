@@ -376,8 +376,12 @@ class LocalMCPHub {
       mcpCommand = 'node';
       mcpArgs = [path.join(__dirname, '..', 'mcps', 'context7', 'dist', 'index.js')];
     } else {
-      // Serena tool
-      mcpCommand = path.join(__dirname, '..', 'mcps', 'serena', '.venv', 'bin', 'serena-mcp-server');
+      // Serena tool - handle Windows vs Unix paths
+      const isWindows = process.platform === 'win32';
+      const venvDir = isWindows ? 'Scripts' : 'bin';
+      const executable = isWindows ? 'serena-mcp-server.exe' : 'serena-mcp-server';
+      
+      mcpCommand = path.join(__dirname, '..', 'mcps', 'serena', '.venv', venvDir, executable);
       mcpArgs = [
         '--context', 'ide-assistant',
         '--project', path.join(__dirname, '..'),

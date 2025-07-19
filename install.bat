@@ -8,12 +8,14 @@ echo ==================================
 :: Check if we're in the right directory
 if not exist "package.json" (
     echo ❌ Please run this script from the local-mcp-hub directory
+    pause
     exit /b 1
 )
 
 findstr "local-mcp-hub" package.json >nul 2>&1
 if errorlevel 1 (
     echo ❌ Please run this script from the local-mcp-hub directory
+    pause
     exit /b 1
 )
 
@@ -25,52 +27,64 @@ cd mcps
 echo 🔍 Checking dependencies...
 
 :: Check for git
+echo    Checking Git...
 git --version >nul 2>&1
 if errorlevel 1 (
     echo ❌ Git is required but not installed
     echo Please install Git from https://git-scm.com/download/win
+    pause
     exit /b 1
 )
+echo ✅ Git found
 
 :: Check for node
+echo    Checking Node.js...
 node --version >nul 2>&1
 if errorlevel 1 (
     echo ❌ Node.js is required but not installed
     echo Please install Node.js from https://nodejs.org
+    pause
     exit /b 1
 )
+echo ✅ Node.js found
 
 :: Check for npm
+echo    Checking npm...
 npm --version >nul 2>&1
 if errorlevel 1 (
     echo ❌ npm is required but not installed
+    pause
     exit /b 1
 )
+echo ✅ npm found
 
 :: Check for python
+echo    Checking Python...
 python --version >nul 2>&1
 if errorlevel 1 (
     echo ❌ Python 3 is required but not installed
     echo Please install Python from https://python.org
+    pause
     exit /b 1
 )
+echo ✅ Python found
 
 :: Check for uv (Python package manager)
-uv --version >nul 2>&1
+echo    Checking uv...
+python -m uv --version >nul 2>&1
 if errorlevel 1 (
-    echo ⚠️  uv not found, installing...
-    powershell -Command "irm https://astral.sh/uv/install.ps1 | iex"
-    :: Add to PATH for current session
-    set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
-    :: Verify installation
-    uv --version >nul 2>&1
+    echo ⚠️  uv not found, installing via pip...
+    pip install --user uv >nul 2>&1
+    python -m uv --version >nul 2>&1
     if errorlevel 1 (
-        echo ❌ Failed to install uv. Please install manually: https://docs.astral.sh/uv/getting-started/installation/
+        echo ❌ Failed to install uv
+        pause
         exit /b 1
     )
 )
+echo ✅ uv ready
 
-echo ✅ All dependencies found
+echo ✅ All dependencies checked
 
 :: Download Serena
 echo 📥 Downloading Serena...
@@ -81,7 +95,14 @@ if exist "serena" (
     cd ..
 ) else (
     git clone https://github.com/oraios/serena.git
+    if errorlevel 1 (
+        echo ❌ Failed to clone Serena repository
+        cd ..
+        pause
+        exit /b 1
+    )
 )
+echo ✅ Serena downloaded
 
 :: Download Context7
 echo 📥 Downloading Context7...
@@ -92,17 +113,37 @@ if exist "context7" (
     cd ..
 ) else (
     git clone https://github.com/upstash/context7.git
+    if errorlevel 1 (
+        echo ❌ Failed to clone Context7 repository
+        cd ..
+        pause
+        exit /b 1
+    )
 )
+echo ✅ Context7 downloaded
 
 :: Set up Serena
 echo 🔧 Setting up Serena...
 cd serena
 if not exist ".venv" (
     echo    Creating Python virtual environment...
-    uv venv
+    python -m uv venv
+    if errorlevel 1 (
+        echo ❌ Failed to create virtual environment
+        cd ..\..
+        pause
+        exit /b 1
+    )
 )
 echo    Installing Serena dependencies...
-uv pip install -e .
+python -m uv pip install --python .venv\Scripts\python.exe -e .
+if errorlevel 1 (
+    echo ❌ Failed to install Serena dependencies
+    cd ..\..
+    pause
+    exit /b 1
+)
+echo ✅ Serena setup complete
 cd ..
 
 :: Set up Context7
@@ -110,43 +151,66 @@ echo 🔧 Setting up Context7...
 cd context7
 echo    Installing Context7 dependencies...
 call npm install
+if errorlevel 1 (
+    echo ❌ Failed to install Context7 dependencies
+    cd ..\..
+    pause
+    exit /b 1
+)
 if not exist "dist" (
     echo    Building Context7...
     call npm run build
+    if errorlevel 1 (
+        echo ❌ Failed to build Context7
+        cd ..\..
+        pause
+        exit /b 1
+    )
 )
+echo ✅ Context7 setup complete
 cd ..
 
 :: Update hub configuration
 echo ⚙️  Updating hub configuration...
 cd ..
 
-:: Create config.json
-(
-echo {
-echo   "ollama": {
-echo     "host": "http://10.0.0.24:11434",
-echo     "model": "qwen2.5:latest"
-echo   },
-echo   "hub": {
-echo     "port": 3002,
-echo     "log_level": "info",
-echo     "cors_origins": ["*"]
-echo   },
-echo   "mcps": {
-echo     "enabled": ["serena", "context7"]
-echo   }
-echo }
-) > config.json
+:: Create config.json if it doesn't exist
+if not exist "config.json" (
+    echo    Creating config.json...
+    (
+    echo {
+    echo   "ollama": {
+    echo     "host": "http://10.0.0.24:11434",
+    echo     "model": "qwen2.5:latest"
+    echo   },
+    echo   "hub": {
+    echo     "port": 3002,
+    echo     "log_level": "info",
+    echo     "cors_origins": ["*"]
+    echo   },
+    echo   "mcps": {
+    echo     "enabled": ["serena", "context7"]
+    echo   }
+    echo }
+    ) > config.json
+    echo ✅ Created config.json
+) else (
+    echo ✅ config.json already exists
+)
 
+echo.
 echo ✅ Installation complete!
 echo.
 echo 📋 Summary:
 echo    • Serena: %CD%\mcps\serena
 echo    • Context7: %CD%\mcps\context7
-echo    • Configuration updated to enable both MCPs
+echo    • Configuration: config.json
 echo.
 echo 🚀 Next steps:
-echo    1. Run 'npm start' to start the hub
-echo    2. Use the continue-config.yaml file with Continue extension
-echo    3. Test with: curl http://localhost:3002/v1/tools
+echo    1. Edit config.json to update your Ollama server address
+echo    2. Run 'npm install' to install hub dependencies
+echo    3. Run 'npm start' to start the hub
+echo    4. Test with: curl http://localhost:3002/health
 echo.
+echo Press any key to continue...
+pause >nul
