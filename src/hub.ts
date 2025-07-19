@@ -251,7 +251,7 @@ class LocalMCPHub {
       }
     });
 
-    // Basic completions endpoint with hard-coded suggestions for testing
+    // Completions endpoint for code autocomplete
     this.app.post('/v1/completions', async (req, res) => {
       try {
         logger.info('Received completion request');
@@ -262,18 +262,6 @@ class LocalMCPHub {
         }
 
         // Parse FIM request and create context-aware completion
-        console.log('=== RECEIVED PROMPT ===');
-        console.log(JSON.stringify(prompt));
-        console.log('=======================');
-        
-        // Save the FIM query to file for offline testing
-        const fs = require('fs');
-        fs.writeFileSync('fim-query.json', JSON.stringify({
-          prompt: prompt,
-          max_tokens: max_tokens,
-          temperature: temperature,
-          stream: stream
-        }, null, 2));
         
         const fimRequest = CompletionHandler.parseFIMRequest(prompt);
         

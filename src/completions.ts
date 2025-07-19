@@ -5,7 +5,6 @@ export interface FIMRequest {
 }
 
 export interface CompletionContext {
-  language: string;
   prefix: string;
   suffix: string;
   cleanPrefix: string;
@@ -28,38 +27,8 @@ export class CompletionHandler {
     return { prefix, suffix, isFIM: true };
   }
 
-  static detectLanguage(prefix: string, suffix: string): string {
-    const fullText = prefix + suffix;
-    
-    // C++ indicators
-    if (fullText.includes('#include') || fullText.includes('std::') || 
-        fullText.includes('namespace') || /\w+::\w+/.test(fullText) ||
-        fullText.includes('.cpp') || fullText.includes('.hpp') || fullText.includes('.h')) {
-      return 'cpp';
-    }
-    
-    // Python indicators  
-    if (fullText.includes('def ') || fullText.includes('import ') ||
-        fullText.includes('from ') || fullText.includes('__init__') ||
-        fullText.includes('.py') || /^\s*#/.test(fullText)) {
-      return 'python';
-    }
-    
-    // TypeScript indicators
-    if (fullText.includes('interface ') || fullText.includes(': string') ||
-        fullText.includes(': number') || fullText.includes('async ') ||
-        fullText.includes('.ts') || fullText.includes('export ') ||
-        fullText.includes('import {')) {
-      return 'typescript';
-    }
-    
-    // Default fallback
-    return 'unknown';
-  }
 
   static createCompletionContext(prefix: string, suffix: string): CompletionContext {
-    const language = this.detectLanguage(prefix, suffix);
-    
     // Clean up the prefix to get actual code context
     const lines = prefix.split('\n');
     const codeLines = lines.filter(line => {
@@ -68,49 +37,12 @@ export class CompletionHandler {
     });
     const cleanPrefix = codeLines.slice(-8).join('\n'); // Last 8 lines of actual code
     
-    return { language, prefix, suffix, cleanPrefix };
+    return { prefix, suffix, cleanPrefix };
   }
 
   static createCompletionPrompt(context: CompletionContext): string {
-    const { language, cleanPrefix, suffix } = context;
-    
-    switch (language) {
-      case 'cpp':
-        return CppCompletions.createPrompt(cleanPrefix, suffix);
-      case 'python':
-        return PythonCompletions.createPrompt(cleanPrefix, suffix);
-      case 'typescript':
-        return TypeScriptCompletions.createPrompt(cleanPrefix, suffix);
-      default:
-        return GenericCompletions.createPrompt(cleanPrefix, suffix);
-    }
+    const { cleanPrefix, suffix } = context;
+    return `<PRE> ${cleanPrefix} <SUF>${suffix} <MID>`;
   }
 }
 
-class CppCompletions {
-  static createPrompt(prefix: string, suffix: string): string {
-    // Use standard FIM format
-    return `<PRE> ${prefix} <SUF>${suffix} <MID>`;
-  }
-}
-
-class PythonCompletions {
-  static createPrompt(prefix: string, suffix: string): string {
-    // Use standard FIM format
-    return `<PRE> ${prefix} <SUF>${suffix} <MID>`;
-  }
-}
-
-class TypeScriptCompletions {
-  static createPrompt(prefix: string, suffix: string): string {
-    // Use standard FIM format similar to Code Llama
-    return `<PRE> ${prefix} <SUF>${suffix} <MID>`;
-  }
-}
-
-class GenericCompletions {
-  static createPrompt(prefix: string, suffix: string): string {
-    // Use standard FIM format from Code Llama
-    return `<PRE> ${prefix} <SUF>${suffix} <MID>`;
-  }
-}
