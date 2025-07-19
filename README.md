@@ -54,19 +54,35 @@ Dev Machine                    Remote Server
 
 ### Installation
 
-1. **Clone and install:**
+1. **Clone the repository:**
    ```bash
    git clone <repository-url>
    cd local-mcp-hub
+   ```
+
+2. **Run the installer for your platform:**
+
+   **Linux:**
+   ```bash
    ./install.sh
    ```
 
-2. **Start the hub:**
+   **macOS:**
+   ```bash
+   ./install-mac.sh
+   ```
+
+   **Windows:**
+   ```cmd
+   install.bat
+   ```
+
+3. **Start the hub:**
    ```bash
    npm start
    ```
 
-3. **Configure Continue extension** in VS Code:
+4. **Configure Continue extension** in VS Code:
    ```yaml
    models:
      - name: "Local MCP Hub + Qwen2.5"
