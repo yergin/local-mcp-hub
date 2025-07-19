@@ -77,12 +77,24 @@ Dev Machine                    Remote Server
    install.bat
    ```
 
-3. **Start the hub:**
+3. **Configure the Ollama server connection:**
+   
+   Edit `config.json` and update the Ollama host to match your server:
+   ```json
+   {
+     "ollama": {
+       "host": "http://YOUR_OLLAMA_SERVER:11434",
+       "model": "qwen2.5:latest"
+     }
+   }
+   ```
+
+4. **Start the hub:**
    ```bash
    npm start
    ```
 
-4. **Configure Continue extension** in VS Code:
+5. **Configure Continue extension** in VS Code:
    ```yaml
    models:
      - name: "Local MCP Hub + Qwen2.5"
@@ -183,9 +195,18 @@ PORT=3003 npm start
 3. Verify Python virtual environment: `mcps/serena/.venv/`
 
 ### Ollama Connection Issues
-1. Update `config.json` with correct Ollama server address
+1. **Update `config.json`** with correct Ollama server address:
+   ```json
+   {
+     "ollama": {
+       "host": "http://YOUR_OLLAMA_SERVER:11434",
+       "model": "qwen2.5:latest"
+     }
+   }
+   ```
 2. Test direct connection: `curl http://your-server:11434/api/tags`
 3. Ensure qwen2.5:latest model is installed on server
+4. Check firewall settings allow access to port 11434
 
 ## Contributing
 
