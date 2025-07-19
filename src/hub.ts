@@ -4,7 +4,19 @@ import winston from 'winston';
 import fs from 'fs';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
-import { CompletionHandler } from './completions';
+
+// Completion interfaces
+interface FIMRequest {
+  prefix: string;
+  suffix: string;
+  isFIM: boolean;
+}
+
+interface CompletionContext {
+  prefix: string;
+  suffix: string;
+  cleanPrefix: string;
+}
 
 // Configuration interface
 interface Config {
@@ -263,7 +275,7 @@ class LocalMCPHub {
 
         // Parse FIM request and create context-aware completion
         
-        const fimRequest = CompletionHandler.parseFIMRequest(prompt);
+        const fimRequest = this.parseFIMRequest(prompt);
         
         // Extract the immediate code before cursor (last line)
         const lines = fimRequest.prefix.split('\n');
@@ -592,6 +604,40 @@ ${hubContent.substring(0, 1000)}...
     }
     
     return methods.slice(0, 10); // Limit to first 10 methods
+  }
+
+  // Completion handler methods
+  private parseFIMRequest(prompt: string): FIMRequest {
+    // Check if this is a FIM (Fill-In-Middle) request
+    if (!prompt.includes('<fim_prefix>') || !prompt.includes('<fim_suffix>')) {
+      return { prefix: prompt, suffix: '', isFIM: false };
+    }
+
+    // Extract the prefix and suffix from the FIM format
+    const prefixMatch = prompt.match(/<fim_prefix>(.*?)<fim_suffix>/s);
+    const suffixMatch = prompt.match(/<fim_suffix>(.*?)<fim_middle>/s);
+    
+    const prefix = prefixMatch ? prefixMatch[1] : '';
+    const suffix = suffixMatch ? suffixMatch[1] : '';
+    
+    return { prefix, suffix, isFIM: true };
+  }
+
+  private createCompletionContext(prefix: string, suffix: string): CompletionContext {
+    // Clean up the prefix to get actual code context
+    const lines = prefix.split('\n');
+    const codeLines = lines.filter(line => {
+      const trimmed = line.trim();
+      return trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('//') && !trimmed.startsWith('Path:');
+    });
+    const cleanPrefix = codeLines.slice(-8).join('\n'); // Last 8 lines of actual code
+    
+    return { prefix, suffix, cleanPrefix };
+  }
+
+  private createCompletionPrompt(context: CompletionContext): string {
+    const { cleanPrefix, suffix } = context;
+    return `<PRE> ${cleanPrefix} <SUF>${suffix} <MID>`;
   }
 }
 
