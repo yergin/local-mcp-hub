@@ -250,6 +250,85 @@ class LocalMCPHub {
       }
     });
 
+    // Basic completions endpoint with hard-coded suggestions for testing
+    this.app.post('/v1/completions', async (req, res) => {
+      try {
+        logger.info('Received completion request');
+        const { prompt, max_tokens = 50, temperature = 0.1, stream = false } = req.body;
+        
+        if (!prompt) {
+          return res.status(400).json({ error: 'Prompt is required' });
+        }
+
+        // Hard-coded suggestions based on context
+        let suggestion = '';
+        
+        if (prompt.includes('function fibonacci')) {
+          suggestion = '(n: number): number {\n    if (n <= 1) return n;\n    return fibonacci(n - 1) + fibonacci(n - 2);\n}';
+        } else if (prompt.includes('<fim_middle>')) {
+          // FIM (Fill-In-Middle) request
+          if (prompt.includes('function')) {
+            suggestion = '(n: number): number';
+          } else if (prompt.includes('const')) {
+            suggestion = ' = "hello world";';
+          } else {
+            suggestion = '\n    // TODO: implement';
+          }
+        } else {
+          suggestion = '\n    // Auto-generated suggestion';
+        }
+
+        if (stream) {
+          // Handle streaming for autocomplete
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*'
+          });
+
+          const id = `cmpl-${Date.now()}`;
+          const created = Math.floor(Date.now() / 1000);
+          
+          // Send the suggestion as a single chunk
+          const streamChunk = {
+            id,
+            object: 'text_completion',
+            created,
+            model: this.config.ollama.model,
+            choices: [{
+              text: suggestion,
+              index: 0,
+              finish_reason: 'stop'
+            }]
+          };
+          
+          res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        } else {
+          // Non-streaming response
+          const responseObj = {
+            id: `cmpl-${Date.now()}`,
+            object: 'text_completion',
+            created: Math.floor(Date.now() / 1000),
+            model: this.config.ollama.model,
+            choices: [{
+              text: suggestion,
+              index: 0,
+              finish_reason: 'stop'
+            }]
+          };
+          
+          res.json(responseObj);
+        }
+        
+      } catch (error) {
+        logger.error('Error in completion:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
     // List available tools (placeholder for now)
     this.app.get('/v1/tools', (req, res) => {
       const tools = this.getAvailableTools();

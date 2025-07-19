@@ -18,6 +18,16 @@ models:
       temperature: 0.7
       maxTokens: 4000
 
+tabAutocompleteModel:
+  name: "Local MCP Hub + Qwen2.5 Autocomplete"
+  provider: openai
+  model: "qwen2.5:latest"
+  apiBase: "http://localhost:3002/v1"
+  apiKey: "dummy-key"
+  requestOptions:
+    headers:
+      "User-Agent": "Continue-VSCode-Autocomplete"
+
 contextProviders:
   - name: http
     params:
