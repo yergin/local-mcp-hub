@@ -262,12 +262,44 @@ class LocalMCPHub {
         }
 
         // Parse FIM request and create context-aware completion
-        const fimRequest = CompletionHandler.parseFIMRequest(prompt);
-        const context = CompletionHandler.createCompletionContext(fimRequest.prefix, fimRequest.suffix);
-        const completionPrompt = CompletionHandler.createCompletionPrompt(context);
+        console.log('=== RECEIVED PROMPT ===');
+        console.log(JSON.stringify(prompt));
+        console.log('=======================');
         
-        // Get completion from Ollama
-        const suggestion = await this.sendToOllama(completionPrompt, temperature, Math.min(max_tokens, 100));
+        // Save the FIM query to file for offline testing
+        const fs = require('fs');
+        fs.writeFileSync('fim-query.json', JSON.stringify({
+          prompt: prompt,
+          max_tokens: max_tokens,
+          temperature: temperature,
+          stream: stream
+        }, null, 2));
+        
+        const fimRequest = CompletionHandler.parseFIMRequest(prompt);
+        
+        // Extract the immediate code before cursor (last line)
+        const lines = fimRequest.prefix.split('\n');
+        const codeBeforeCursor = lines[lines.length - 1] || '';
+        const projectContext = lines.slice(0, -1).join('\n');
+
+        // Create context-aware completion prompt
+        const completionPrompt = `You are a code completion assistant. Complete the code at the cursor position.
+
+PROJECT CONTEXT (for language/framework detection):
+${projectContext}
+
+CODE IMMEDIATELY BEFORE CURSOR:
+${codeBeforeCursor}
+
+CODE AFTER CURSOR (suffix):
+${fimRequest.suffix}
+
+TASK: Complete the code starting from the cursor position. Your response must include the suffix "${fimRequest.suffix}" and can continue beyond it with appropriate code completion.
+
+COMPLETION:`;
+
+        // Get completion from Ollama using full context
+        const suggestion = await this.sendToOllama(completionPrompt, temperature, Math.min(max_tokens, 150));
 
         if (stream) {
           // Handle streaming for autocomplete

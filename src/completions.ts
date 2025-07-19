@@ -89,56 +89,28 @@ export class CompletionHandler {
 
 class CppCompletions {
   static createPrompt(prefix: string, suffix: string): string {
-    return `You are completing C++ code. Return ONLY the missing code that should be inserted at the cursor position. Do not repeat any existing code.
-
-Code before cursor:
-${prefix}
-
-Code after cursor:
-${suffix}
-
-Insert only the missing code:`;
+    // Use standard FIM format
+    return `<PRE> ${prefix} <SUF>${suffix} <MID>`;
   }
 }
 
 class PythonCompletions {
   static createPrompt(prefix: string, suffix: string): string {
-    return `You are completing Python code. Return ONLY the missing code that should be inserted at the cursor position. Do not repeat any existing code.
-
-Code before cursor:
-${prefix}
-
-Code after cursor:
-${suffix}
-
-Insert only the missing code:`;
+    // Use standard FIM format
+    return `<PRE> ${prefix} <SUF>${suffix} <MID>`;
   }
 }
 
 class TypeScriptCompletions {
   static createPrompt(prefix: string, suffix: string): string {
-    return `You are completing TypeScript code. Return ONLY the missing code that should be inserted at the cursor position. Do not repeat any existing code.
-
-Code before cursor:
-${prefix}
-
-Code after cursor:
-${suffix}
-
-Insert only the missing code:`;
+    // Use standard FIM format similar to Code Llama
+    return `<PRE> ${prefix} <SUF>${suffix} <MID>`;
   }
 }
 
 class GenericCompletions {
   static createPrompt(prefix: string, suffix: string): string {
-    return `You are completing code. Return ONLY the missing code that should be inserted at the cursor position. Do not repeat any existing code.
-
-Code before cursor:
-${prefix}
-
-Code after cursor:
-${suffix}
-
-Insert only the missing code:`;
+    // Use standard FIM format from Code Llama
+    return `<PRE> ${prefix} <SUF>${suffix} <MID>`;
   }
 }
