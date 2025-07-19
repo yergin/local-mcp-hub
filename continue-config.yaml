@@ -16,7 +16,7 @@ models:
       - apply
       - autocomplete
     defaultCompletionOptions:
-      temperature: 0.7
+      temperature: 0.2
       maxTokens: 4000
 
 tabAutocompleteModel:
@@ -28,6 +28,11 @@ tabAutocompleteModel:
   requestOptions:
     headers:
       "User-Agent": "Continue-VSCode-Autocomplete"
+
+tabAutocompleteOptions:
+  multilineCompletions: "always"
+  maxPromptTokens: 4000
+  debounceDelay: 300
 
 contextProviders:
   - name: http

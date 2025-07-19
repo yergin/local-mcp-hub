@@ -267,7 +267,20 @@ class LocalMCPHub {
     this.app.post('/v1/completions', async (req, res) => {
       try {
         logger.info('Received completion request');
-        const { prompt, max_tokens = 50, temperature = 0.1, stream = false } = req.body;
+        
+        // Store first completion request for debugging
+        const tmpDir = path.join(__dirname, '..', '.tmp');
+        const compreqPath = path.join(tmpDir, 'compreq.json');
+        if (!fs.existsSync(compreqPath)) {
+          // Ensure .tmp directory exists
+          if (!fs.existsSync(tmpDir)) {
+            fs.mkdirSync(tmpDir, { recursive: true });
+          }
+          fs.writeFileSync(compreqPath, JSON.stringify(req.body, null, 2));
+          logger.info('Stored completion request to .tmp/compreq.json');
+        }
+        
+        const { prompt, max_tokens = 50, temperature = 0.2, stream = false } = req.body;
         
         if (!prompt) {
           return res.status(400).json({ error: 'Prompt is required' });
@@ -280,31 +293,37 @@ class LocalMCPHub {
         // Extract the immediate code before cursor (last line)
         const lines = fimRequest.prefix.split('\n');
         const codeBeforeCursor = lines[lines.length - 1] || '';
-        const projectContext = lines.slice(0, -1).join('\n');
+        
+        // Extract only the last file path for language context
+        const filePathLines = lines
+          .filter(line => line.trim().startsWith('// Path: '))
+          .map(line => line.trim());
+        const languageContext = filePathLines.length > 0 ? filePathLines[filePathLines.length - 1] : '';
 
         // Create context-aware completion prompt
-        const completionPrompt = `You are a code completion assistant. Complete the code at the cursor position. Do not add explanations and respond in plain text starting with the code said to be shown before the cursor character-for-character as your text will replace the code directly.
+        const completionPrompt = `You are an efficient code completion assistant. Your goal is to save the developer time by writing as much useful, correct code as possible.
 
-PROJECT CONTEXT (only provided for you to quickly guess the language/framework):
-${projectContext}
+File: ${languageContext.replace('// Path: ', '')}
+Code before cursor: ${codeBeforeCursor}
+Code after cursor: ${fimRequest.suffix}
 
-CODE IMMEDIATELY BEFORE CURSOR:
-${codeBeforeCursor}
+Your response must start with the exact text "${codeBeforeCursor}" character-for-character, then continue with your completion, and include the suffix "${fimRequest.suffix}". Provide a meaningful completion that implements or extends the code logically. Write clean, well-typed code.
 
-CODE AFTER CURSOR (suffix):
-${fimRequest.suffix}
-
-TASK: Complete the code making sure to include the suffix "${fimRequest.suffix}" and continue beyond it with appropriate code completion as you see fit.
-
-COMPLETION:`;
+IMPORTANT: Respond with plain text only. Do not use code blocks, markdown formatting, or backticks. Do not add explanations or comments after the code. Only provide the completed code.`;
 
         // Get completion from Ollama using full context
-        const rawSuggestion = await this.sendToOllama(completionPrompt, temperature, Math.min(max_tokens, 150));
+        const rawSuggestion = await this.sendToOllama(completionPrompt, temperature, max_tokens);
+        
+        logger.info(`Raw Ollama response: ${rawSuggestion.substring(0, 200)}${rawSuggestion.length > 200 ? '...' : ''}`);
         
         // Trim the prefix from the response to get just the completion
         let suggestion = rawSuggestion;
         if (rawSuggestion.startsWith(codeBeforeCursor)) {
           suggestion = rawSuggestion.slice(codeBeforeCursor.length);
+          logger.info(`Trimmed suggestion: ${suggestion.substring(0, 200)}${suggestion.length > 200 ? '...' : ''}`);
+        } else {
+          logger.warn(`Response doesn't start with expected prefix: "${codeBeforeCursor}"`);
+          logger.warn(`Response starts with: "${rawSuggestion.substring(0, 50)}"`);
         }
 
         if (stream) {
@@ -332,6 +351,7 @@ COMPLETION:`;
             }]
           };
           
+          logger.info(`Sending to VS Code: ${suggestion.substring(0, 200)}${suggestion.length > 200 ? '...' : ''}`);
           res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
           res.write('data: [DONE]\n\n');
           res.end();
@@ -613,31 +633,23 @@ ${hubContent.substring(0, 1000)}...
       return { prefix: prompt, suffix: '', isFIM: false };
     }
 
-    // Extract the prefix and suffix from the FIM format
-    const prefixMatch = prompt.match(/<fim_prefix>(.*?)<fim_suffix>/s);
-    const suffixMatch = prompt.match(/<fim_suffix>(.*?)<fim_middle>/s);
+    // Find the last occurrence of the FIM pattern to handle embedded content correctly
+    const lastFimSuffixIndex = prompt.lastIndexOf('<fim_suffix>');
+    const lastFimMiddleIndex = prompt.lastIndexOf('<fim_middle>');
     
-    const prefix = prefixMatch ? prefixMatch[1] : '';
-    const suffix = suffixMatch ? suffixMatch[1] : '';
+    if (lastFimSuffixIndex === -1 || lastFimMiddleIndex === -1) {
+      return { prefix: prompt, suffix: '', isFIM: false };
+    }
+    
+    // Extract prefix (everything between <fim_prefix> and the last <fim_suffix>)
+    const prefixStart = prompt.indexOf('<fim_prefix>') + '<fim_prefix>'.length;
+    const prefix = prompt.substring(prefixStart, lastFimSuffixIndex);
+    
+    // Extract suffix (everything between the last <fim_suffix> and <fim_middle>)
+    const suffixStart = lastFimSuffixIndex + '<fim_suffix>'.length;
+    const suffix = prompt.substring(suffixStart, lastFimMiddleIndex);
     
     return { prefix, suffix, isFIM: true };
-  }
-
-  private createCompletionContext(prefix: string, suffix: string): CompletionContext {
-    // Clean up the prefix to get actual code context
-    const lines = prefix.split('\n');
-    const codeLines = lines.filter(line => {
-      const trimmed = line.trim();
-      return trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('//') && !trimmed.startsWith('Path:');
-    });
-    const cleanPrefix = codeLines.slice(-8).join('\n'); // Last 8 lines of actual code
-    
-    return { prefix, suffix, cleanPrefix };
-  }
-
-  private createCompletionPrompt(context: CompletionContext): string {
-    const { cleanPrefix, suffix } = context;
-    return `<PRE> ${cleanPrefix} <SUF>${suffix} <MID>`;
   }
 }
 
