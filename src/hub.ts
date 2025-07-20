@@ -211,7 +211,7 @@ class LocalMCPHub {
           logger.debug('MCP tools:', mcpTools.map((t: OpenAITool) => t.function.name));
           
           const toolSelection = await this.selectToolWithLLM(messages, mcpTools);
-          logger.info(`Tool selection result:`, toolSelection);
+          logger.info(`Tool selection result: ${JSON.stringify(toolSelection)}`);
           
           if (toolSelection) {
             logger.info(`Processing tool selection: ${toolSelection.tool}`);
@@ -794,6 +794,19 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
                 });
                 mcpProcess.stdin?.write(initializedNotification + '\n');
                 logger.debug(`${mcpName} sent initialized notification`);
+                
+                // Follow proper MCP protocol: send tools/list after initialization
+                // For Serena, wait for language server ready signal; for others, send immediately
+                if (mcpName !== 'serena') {
+                  const toolsRequest = JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: 2,
+                    method: 'tools/list',
+                    params: {}
+                  });
+                  mcpProcess.stdin?.write(toolsRequest + '\n');
+                  logger.debug(`${mcpName} sent tools/list request`);
+                }
               } else if (response.id === 2 && response.result) {
                 // Tools list response
                 const tools = response.result.tools || [];
@@ -868,22 +881,7 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
 
       mcpProcess.stdin?.write(initRequest + '\n');
 
-      // Request tools list after initialization (except for Serena which waits for language server)
-      setTimeout(() => {
-        if (initialized && mcpName !== 'serena') {
-          const toolsRequest = JSON.stringify({
-            jsonrpc: '2.0',
-            id: 2,
-            method: 'tools/list',
-            params: {}
-          });
-          mcpProcess.stdin?.write(toolsRequest + '\n');
-          mcpProcess.stdin?.end();
-          logger.debug(`${mcpName} sent tools/list request`);
-        } else if (!initialized) {
-          reject(new Error(`${mcpName} MCP server failed to initialize within timeout`));
-        }
-      }, 3000); // 3 seconds for non-Serena servers
+      // Protocol-based approach: tools/list is sent in response handler after initialization
 
       // Timeout
       setTimeout(() => {
@@ -940,13 +938,65 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
               logger.debug('MCP Response:', response);
               
               if (response.id === 1 && !initialized) {
-                // Initialization response
+                // Step 1: Initialization response
                 initialized = true;
                 logger.info('MCP server initialized successfully');
+                
+                // Send initialized notification
+                const initializedNotification = JSON.stringify({
+                  jsonrpc: '2.0',
+                  method: 'notifications/initialized',
+                  params: {}
+                });
+                process.stdin?.write(initializedNotification + '\n');
+                
+                // Step 2: Send tools/list request
+                const toolsRequest = JSON.stringify({
+                  jsonrpc: '2.0',
+                  id: 2,
+                  method: 'tools/list',
+                  params: {}
+                });
+                logger.info('📋 Sending tools/list request');
+                process.stdin?.write(toolsRequest + '\n');
+                
               } else if (response.id === 2) {
-                // Tool call response
+                // Step 2: Tools/list response - now send the actual tool call
+                logger.info('📋 Tools list received, sending tool call');
+                
+                const toolCallRequest = JSON.stringify({
+                  jsonrpc: '2.0',
+                  id: 3,
+                  method: 'tools/call',
+                  params: {
+                    name: toolName,
+                    arguments: args
+                  }
+                });
+
+                logger.info('📤 SENDING MCP TOOL CALL REQUEST:');
+                logger.info(`📝 Request JSON: ${toolCallRequest}`);
+                logger.info(`🔧 Tool name: ${toolName}`);
+                logger.info(`📋 Args object: ${JSON.stringify(args, null, 2)}`);
+                process.stdin?.write(toolCallRequest + '\n');
+                process.stdin?.end();
+                
+              } else if (response.id === 3) {
+                // Step 3: Tool call response
                 if (response.result) {
-                  resolve(response.result.content || JSON.stringify(response.result));
+                  // Extract the actual result data from MCP response structure
+                  let resultData = 'Tool executed successfully';
+                  
+                  if (response.result.structuredContent && response.result.structuredContent.result) {
+                    resultData = response.result.structuredContent.result;
+                  } else if (response.result.content && response.result.content.length > 0) {
+                    resultData = response.result.content[0].text || JSON.stringify(response.result.content);
+                  } else {
+                    resultData = JSON.stringify(response.result);
+                  }
+                  
+                  logger.debug('Extracted tool result:', resultData);
+                  resolve(resultData);
                 } else if (response.error) {
                   reject(new Error(`MCP tool error: ${response.error.message}`));
                 } else {
@@ -1000,23 +1050,8 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
       logger.debug('Sending MCP init request:', initRequest);
       process.stdin?.write(initRequest + '\n');
 
-      // Wait for initialization, then get tools list, then call tool
-      setTimeout(() => {
-        if (initialized) {
-          // First get the tools list to understand the schema
-          const toolsListRequest = JSON.stringify({
-            jsonrpc: '2.0',
-            id: 2,
-            method: 'tools/list',
-            params: {}
-          });
-
-          logger.debug('Sending MCP tools/list request:', toolsListRequest);
-          process.stdin?.write(toolsListRequest + '\n');
-        } else {
-          reject(new Error('MCP server failed to initialize within timeout'));
-        }
-      }, 2000); // Wait 2 seconds for initialization
+      // Follow proper MCP protocol: initialize → tools/list → tools/call
+      // No timeouts, just respond to actual protocol messages
 
       // Overall timeout after 30 seconds
       setTimeout(() => {
@@ -1091,69 +1126,96 @@ ${hubContent.substring(0, 1000)}...
     logger.debug(`DEBUG: User request: "${userRequest}"`);
     logger.debug(`DEBUG: Number of tools: ${tools.length}`);
     
-    // Create tool descriptions for the LLM
-    const toolDescriptions = tools.map(tool => {
-      const params = Object.entries(tool.function.parameters.properties || {})
-        .map(([name, schema]: [string, any]) => `${name}: ${schema.description || schema.type}`)
-        .join(', ');
-      
-      return `- ${tool.function.name}(${params}): ${tool.function.description}`;
+    // Stage 1: Select the tool using only names and USE WHEN descriptions
+    const toolNames = tools.map(tool => {
+      const guidance = this.getToolUsageGuidance(tool.function.name);
+      const shortDesc = tool.function.description.split('.')[0]; // Take first sentence only
+      return `- ${tool.function.name}: ${shortDesc}${guidance ? '. ' + guidance : ''}`;
     }).join('\n');
-    
-    logger.debug(`DEBUG: Tool descriptions length: ${toolDescriptions.length} chars`);
-    logger.debug(`DEBUG: First few tools: ${tools.slice(0, 3).map(t => t.function.name).join(', ')}`);
     
     const toolSelectionPrompt = `You are a helpful assistant that can use tools to help users.
 
 User request: "${userRequest}"
 
 Available tools:
-${toolDescriptions}
+${toolNames}
 
 INSTRUCTIONS:
 1. Check if the user's request matches any tool's "USE WHEN" criteria
-2. If a tool matches, respond with: {"tool": "tool_name", "args": {"param": "value"}}
+2. If a tool matches, respond with: {"tool": "tool_name"}
 3. If no tool matches, respond with: {"tool": null}
-4. Extract arguments from the user's request based on the tool's parameter requirements
-5. Use relative paths (e.g., "." for current directory) and appropriate boolean values
 
 RESPOND WITH ONLY THE JSON, NO OTHER TEXT.
 
 Response:`;
     
-    logger.debug(`DEBUG: Full tool selection prompt:\n${toolSelectionPrompt}`);
-    logger.debug(`DEBUG: Prompt length: ${toolSelectionPrompt.length} chars`);
+    logger.debug(`DEBUG: Stage 1 prompt length: ${toolSelectionPrompt.length} chars`);
     
     try {
-      logger.debug(`DEBUG: Calling sendToOllama with temp=0.1, maxTokens=200`);
-      const response = await this.sendToOllama(toolSelectionPrompt, 0.1, 200);
+      // Stage 1: Select the tool
+      const toolResponse = await this.sendToOllama(toolSelectionPrompt, 0.1, 100);
+      const cleanToolResponse = toolResponse.trim().replace(/```json|```/g, '').trim();
       
-      logger.debug(`DEBUG: Raw Ollama response: "${response}"`);
-      logger.debug(`DEBUG: Response length: ${response.length} chars`);
+      logger.debug(`DEBUG: Stage 1 response: "${cleanToolResponse}"`);
       
-      // Clean up the response and try to parse JSON
-      const cleanResponse = response.trim().replace(/```json|```/g, '').trim();
+      const toolSelection = JSON.parse(cleanToolResponse);
       
-      logger.debug(`DEBUG: Cleaned response: "${cleanResponse}"`);
-      logger.info(`Tool selection response: ${cleanResponse}`);
-      
-      const selection = JSON.parse(cleanResponse);
-      logger.debug(`DEBUG: Parsed selection:`, selection);
-      
-      if (selection.tool && selection.tool !== null) {
-        // Validate that the selected tool exists in our MCP tools
-        const selectedTool = tools.find(t => t.function.name === selection.tool);
-        if (selectedTool) {
-          logger.info(`LLM selected MCP tool: ${selection.tool} with args:`, selection.args);
-          return { tool: selection.tool, args: selection.args || {} };
-        } else {
-          logger.warn(`LLM selected non-existent MCP tool: ${selection.tool}`);
-        }
+      if (!toolSelection.tool || toolSelection.tool === null) {
+        logger.info('No tool selected by LLM');
+        return null;
       }
       
-      return null;
+      // Find the selected tool
+      const selectedTool = tools.find(t => t.function.name === toolSelection.tool);
+      if (!selectedTool) {
+        logger.warn(`LLM selected non-existent tool: ${toolSelection.tool}`);
+        return null;
+      }
+      
+      logger.info(`Stage 1: LLM selected tool: ${toolSelection.tool}`);
+      
+      // Stage 2: Generate arguments for the selected tool
+      const params = Object.entries(selectedTool.function.parameters.properties || {})
+        .map(([name, schema]: [string, any]) => `- ${name} (${schema.type}): ${schema.description || 'No description'}`)
+        .join('\n');
+      
+      const argsPrompt = `You are a helpful assistant that generates tool arguments.
+
+User request: "${userRequest}"
+Selected tool: ${selectedTool.function.name}
+
+Tool description: ${selectedTool.function.description}
+
+Parameters:
+${params}
+
+INSTRUCTIONS:
+1. Extract arguments from the user's request based on the tool's parameter requirements
+2. Use relative paths (e.g., "." for current directory) and appropriate boolean values
+3. Respond with: {"args": {"param1": "value1", "param2": "value2"}}
+
+RESPOND WITH ONLY THE JSON, NO OTHER TEXT.
+
+Response:`;
+      
+      logger.debug(`DEBUG: Stage 2 prompt length: ${argsPrompt.length} chars`);
+      
+      const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 150);
+      const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
+      
+      logger.debug(`DEBUG: Stage 2 response: "${cleanArgsResponse}"`);
+      
+      const argsSelection = JSON.parse(cleanArgsResponse);
+      
+      logger.info(`Stage 2: Generated args: ${JSON.stringify(argsSelection.args)}`);
+      
+      return { 
+        tool: toolSelection.tool, 
+        args: argsSelection.args || {} 
+      };
+      
     } catch (error) {
-      logger.error('Error in LLM tool selection:', error);
+      logger.error('Error in two-stage tool selection:', error);
       return null;
     }
   }
