@@ -181,23 +181,8 @@ class LocalMCPHub {
         if (hasToolResults) {
           // Generate final response using tool results
           const response = await this.generateResponseWithToolResults(messages, temperature, max_tokens);
-          
-          const openaiResponse = {
-            id: `chatcmpl-${Date.now()}`,
-            object: 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model: this.config.ollama.model,
-            choices: [{
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: response
-              },
-              finish_reason: 'stop'
-            }]
-          };
-          
-          return res.json(openaiResponse);
+          this.sendStreamingResponse(res, response);
+          return;
         }
         
         // Check if tools are available and replace with our MCP tools
@@ -241,26 +226,9 @@ class LocalMCPHub {
                 
                 const finalResponse = await this.generateResponseWithToolResults(messagesWithTool, temperature, max_tokens);
                 
-                const openaiResponse = {
-                  id: `chatcmpl-${Date.now()}`,
-                  object: 'chat.completion',
-                  created: Math.floor(Date.now() / 1000),
-                  model: this.config.ollama.model,
-                  choices: [{
-                    index: 0,
-                    message: {
-                      role: 'assistant',
-                      content: finalResponse
-                    },
-                    finish_reason: 'stop'
-                  }]
-                };
-                
                 logger.info('Sending final response with tool results');
-                logger.info(`📋 EXACT RESPONSE BEING SENT TO CONTINUE:`);
-                logger.info(JSON.stringify(openaiResponse, null, 2));
-                logger.info(`📏 Response size: ${JSON.stringify(openaiResponse).length} bytes`);
-                return res.json(openaiResponse);
+                this.sendStreamingResponse(res, finalResponse);
+                return;
                 
               } catch (toolError) {
                 logger.error('Tool execution failed:', toolError);
@@ -268,22 +236,8 @@ class LocalMCPHub {
                 // Fall back to asking for permission
                 const permissionResponse = `I'd like to use the ${toolSelection.tool} tool to answer your question, but I encountered an error: ${toolError instanceof Error ? toolError.message : 'Unknown error'}. Would you like me to try a different approach?`;
                 
-                const openaiResponse = {
-                  id: `chatcmpl-${Date.now()}`,
-                  object: 'chat.completion',
-                  created: Math.floor(Date.now() / 1000),
-                  model: this.config.ollama.model,
-                  choices: [{
-                    index: 0,
-                    message: {
-                      role: 'assistant',
-                      content: permissionResponse
-                    },
-                    finish_reason: 'stop'
-                  }]
-                };
-                
-                return res.json(openaiResponse);
+                this.sendStreamingResponse(res, permissionResponse);
+                return;
               }
               
             } else {
@@ -292,22 +246,8 @@ class LocalMCPHub {
               
               const permissionMessage = `I'd like to use the ${toolSelection.tool} tool with these parameters: ${JSON.stringify(toolSelection.args)}. This tool may modify files or system state. Would you like me to proceed? (Please respond with 'yes' to continue or 'no' to cancel)`;
               
-              const openaiResponse = {
-                id: `chatcmpl-${Date.now()}`,
-                object: 'chat.completion',
-                created: Math.floor(Date.now() / 1000),
-                model: this.config.ollama.model,
-                choices: [{
-                  index: 0,
-                  message: {
-                    role: 'assistant',
-                    content: permissionMessage
-                  },
-                  finish_reason: 'stop'
-                }]
-              };
-              
-              return res.json(openaiResponse);
+              this.sendStreamingResponse(res, permissionMessage);
+              return;
             }
           }
         }
@@ -316,107 +256,9 @@ class LocalMCPHub {
         const basePrompt = this.convertMessagesToPrompt(messages);
         const prompt = await this.enhancePromptWithTools(basePrompt);
         
-        if (stream) {
-          // Set headers for Server-Sent Events
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Authorization, Content-Type'
-          });
-
-          const id = `chatcmpl-${Date.now()}`;
-          const created = Math.floor(Date.now() / 1000);
-          
-          try {
-            const response = await this.sendToOllama(prompt, temperature, max_tokens);
-            
-            // Split response into chunks and send as streaming
-            const words = response.split(' ');
-            
-            for (let i = 0; i < words.length; i++) {
-              const chunk = words[i] + (i < words.length - 1 ? ' ' : '');
-              
-              const streamChunk = {
-                id,
-                object: 'chat.completion.chunk',
-                created,
-                model: this.config.ollama.model,
-                choices: [{
-                  index: 0,
-                  delta: { content: chunk },
-                  finish_reason: null
-                }]
-              };
-              
-              res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
-              
-              // Small delay to simulate streaming
-              await new Promise(resolve => setTimeout(resolve, 50));
-            }
-            
-            // Send final chunk with finish_reason
-            const finalChunk = {
-              id,
-              object: 'chat.completion.chunk',
-              created,
-              model: this.config.ollama.model,
-              choices: [{
-                index: 0,
-                delta: {},
-                finish_reason: 'stop'
-              }],
-              usage: {
-                prompt_tokens: this.estimateTokens(prompt),
-                completion_tokens: this.estimateTokens(response),
-                total_tokens: this.estimateTokens(prompt) + this.estimateTokens(response)
-              }
-            };
-            
-            res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
-            res.write('data: [DONE]\n\n');
-            res.end();
-            
-          } catch (error) {
-            logger.error('Error in streaming completion:', error);
-            const errorChunk = {
-              error: {
-                type: 'internal_server_error',
-                code: 'streaming_failed',
-                message: error instanceof Error ? error.message : 'Unknown error'
-              }
-            };
-            res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-            res.end();
-          }
-        } else {
-          // Non-streaming response
-          const response = await this.sendToOllama(prompt, temperature, max_tokens);
-          
-          // Convert back to OpenAI format
-          const openaiResponse = {
-            id: `chatcmpl-${Date.now()}`,
-            object: 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model: this.config.ollama.model,
-            choices: [{
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: response
-              },
-              finish_reason: 'stop'
-            }],
-            usage: {
-              prompt_tokens: prompt.length,
-              completion_tokens: response.length,
-              total_tokens: prompt.length + response.length
-            }
-          };
-
-          res.json(openaiResponse);
-        }
+        // Always send streaming response to Continue (ignoring stream parameter)
+        const response = await this.sendToOllama(prompt, temperature, max_tokens);
+        this.sendStreamingResponse(res, response);
         
         logger.info('Successfully processed chat completion');
         
@@ -605,6 +447,86 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
       logger.error('Failed to communicate with Ollama:', error);
       throw error;
     }
+  }
+
+  private sendStreamingResponse(res: any, content: string, model?: string): void {
+    // Always send streaming response to Continue
+    logger.info('=== SENDING STREAMING RESPONSE TO CONTINUE ===');
+    
+    // Set SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+    });
+
+    const id = `chatcmpl-${Date.now()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const responseModel = model || this.config.ollama.model;
+    
+    logger.info(`Response headers:`, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+    });
+    logger.info(`Full response content: "${content}"`);
+    logger.info(`=== STREAMING CHUNKS START ===`);
+    
+    // Split response into chunks and send as streaming
+    const words = content.split(' ');
+    
+    for (let i = 0; i < words.length; i++) {
+      const chunk = words[i] + (i < words.length - 1 ? ' ' : '');
+      
+      const streamChunk = {
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model: responseModel,
+        choices: [{
+          index: 0,
+          delta: { content: chunk },
+          finish_reason: null
+        }]
+      };
+      
+      const chunkData = `data: ${JSON.stringify(streamChunk)}\n\n`;
+      logger.debug(`Chunk ${i}: ${chunkData.trim()}`);
+      res.write(chunkData);
+    }
+    
+    // Send final chunk with finish_reason
+    const finalChunk = {
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model: responseModel,
+      choices: [{
+        index: 0,
+        delta: {},
+        finish_reason: 'stop'
+      }],
+      usage: {
+        prompt_tokens: this.estimateTokens(content),
+        completion_tokens: words.length,
+        total_tokens: this.estimateTokens(content) + words.length
+      }
+    };
+    
+    const finalChunkData = `data: ${JSON.stringify(finalChunk)}\n\n`;
+    const doneData = 'data: [DONE]\n\n';
+    
+    logger.info(`Final chunk: ${finalChunkData.trim()}`);
+    logger.info(`Done message: ${doneData.trim()}`);
+    logger.info(`=== END STREAMING RESPONSE ===`);
+    
+    res.write(finalChunkData);
+    res.write(doneData);
+    res.end();
   }
 
   private getAvailableTools(): string[] {
