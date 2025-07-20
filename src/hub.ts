@@ -257,6 +257,9 @@ class LocalMCPHub {
                 };
                 
                 logger.info('Sending final response with tool results');
+                logger.info(`📋 EXACT RESPONSE BEING SENT TO CONTINUE:`);
+                logger.info(JSON.stringify(openaiResponse, null, 2));
+                logger.info(`📏 Response size: ${JSON.stringify(openaiResponse).length} bytes`);
                 return res.json(openaiResponse);
                 
               } catch (toolError) {
