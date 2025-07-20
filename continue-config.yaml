@@ -50,66 +50,6 @@ agents:
       You are an autonomous agent with access to tools via MCP servers.
       You can read files, execute commands, and perform various development tasks.
       Always explain what you're doing and ask for confirmation before making significant changes.
-    tools:
-      - type: function
-        function:
-          name: read_file_content
-          description: Read the contents of a file in the workspace
-          parameters:
-            type: object
-            properties:
-              file_path:
-                type: string
-                description: Path to the file to read
-            required:
-              - file_path
-      - type: function
-        function:
-          name: list_dir
-          description: List contents of a directory
-          parameters:
-            type: object
-            properties:
-              path:
-                type: string
-                description: Directory path to list
-            required:
-              - path
-      - type: function
-        function:
-          name: find_file
-          description: Find files matching a pattern in the workspace
-          parameters:
-            type: object
-            properties:
-              pattern:
-                type: string
-                description: File pattern to search for
-            required:
-              - pattern
-      - type: function
-        function:
-          name: search_for_pattern
-          description: Search for code patterns in the workspace
-          parameters:
-            type: object
-            properties:
-              pattern:
-                type: string
-                description: Code pattern to search for
-              file_type:
-                type: string
-                description: File type filter (optional)
-            required:
-              - pattern
-      - type: function
-        function:
-          name: get_workspace_overview
-          description: Get an overview of the workspace structure
-          parameters:
-            type: object
-            properties: {}
-            required: []
 
 experimental:
   enableAgentMode: true

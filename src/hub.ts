@@ -85,6 +85,8 @@ const logger = winston.createLogger({
 class LocalMCPHub {
   private app: express.Application;
   private config: Config;
+  private mcpToolSchemas: Map<string, OpenAITool> = new Map();
+  private schemasInitialized: boolean = false;
 
   constructor() {
     this.app = express();
@@ -198,40 +200,112 @@ class LocalMCPHub {
           return res.json(openaiResponse);
         }
         
-        // Check if tools are available and let LLM decide whether to use them
+        // Check if tools are available and replace with our MCP tools
         if (tools && tools.length > 0) {
-          logger.info(`Tools available: ${tools.length} tools found`);
-          logger.debug('Available tools:', tools.map((t: OpenAITool) => t.function.name));
-          const toolSelection = await this.selectToolWithLLM(messages, tools);
+          logger.info(`Tools received from Continue: ${tools.length} tools found`);
+          logger.debug('Continue tools:', tools.map((t: OpenAITool) => t.function.name));
+          
+          // Replace Continue's tools with our MCP tools
+          const mcpTools = this.getOpenAITools();
+          logger.info(`Using MCP tools instead: ${mcpTools.length} tools`);
+          logger.debug('MCP tools:', mcpTools.map((t: OpenAITool) => t.function.name));
+          
+          const toolSelection = await this.selectToolWithLLM(messages, mcpTools);
+          logger.info(`Tool selection result:`, toolSelection);
           
           if (toolSelection) {
-            // Return tool call response
-            const toolCallId = `call_${Date.now()}`;
+            logger.info(`Processing tool selection: ${toolSelection.tool}`);
             
-            const openaiResponse = {
-              id: `chatcmpl-${Date.now()}`,
-              object: 'chat.completion',
-              created: Math.floor(Date.now() / 1000),
-              model: this.config.ollama.model,
-              choices: [{
-                index: 0,
-                message: {
-                  role: 'assistant',
-                  content: null,
-                  tool_calls: [{
-                    id: toolCallId,
-                    type: 'function',
-                    function: {
-                      name: toolSelection.tool,
-                      arguments: JSON.stringify(toolSelection.args)
-                    }
+            // Check if this is a safe tool that can be auto-executed
+            if (this.isSafeTool(toolSelection.tool)) {
+              logger.info(`Auto-executing safe tool: ${toolSelection.tool}`);
+              
+              try {
+                // Execute the tool automatically
+                const toolResult = await this.callMCPTool(toolSelection.tool, toolSelection.args);
+                logger.info(`Tool executed successfully, result length: ${toolResult.length}`);
+                
+                // Create messages with tool result for final response
+                const messagesWithTool = [
+                  ...messages,
+                  {
+                    role: 'assistant', 
+                    content: `I'll use the ${toolSelection.tool} tool to help answer your question.`
+                  },
+                  {
+                    role: 'tool',
+                    content: toolResult,
+                    name: toolSelection.tool
+                  }
+                ];
+                
+                const finalResponse = await this.generateResponseWithToolResults(messagesWithTool, temperature, max_tokens);
+                
+                const openaiResponse = {
+                  id: `chatcmpl-${Date.now()}`,
+                  object: 'chat.completion',
+                  created: Math.floor(Date.now() / 1000),
+                  model: this.config.ollama.model,
+                  choices: [{
+                    index: 0,
+                    message: {
+                      role: 'assistant',
+                      content: finalResponse
+                    },
+                    finish_reason: 'stop'
                   }]
-                },
-                finish_reason: 'tool_calls'
-              }]
-            };
-            
-            return res.json(openaiResponse);
+                };
+                
+                logger.info('Sending final response with tool results');
+                return res.json(openaiResponse);
+                
+              } catch (toolError) {
+                logger.error('Tool execution failed:', toolError);
+                
+                // Fall back to asking for permission
+                const permissionResponse = `I'd like to use the ${toolSelection.tool} tool to answer your question, but I encountered an error: ${toolError instanceof Error ? toolError.message : 'Unknown error'}. Would you like me to try a different approach?`;
+                
+                const openaiResponse = {
+                  id: `chatcmpl-${Date.now()}`,
+                  object: 'chat.completion',
+                  created: Math.floor(Date.now() / 1000),
+                  model: this.config.ollama.model,
+                  choices: [{
+                    index: 0,
+                    message: {
+                      role: 'assistant',
+                      content: permissionResponse
+                    },
+                    finish_reason: 'stop'
+                  }]
+                };
+                
+                return res.json(openaiResponse);
+              }
+              
+            } else {
+              // Ask for permission for potentially unsafe tools
+              logger.info(`Asking permission for potentially unsafe tool: ${toolSelection.tool}`);
+              
+              const permissionMessage = `I'd like to use the ${toolSelection.tool} tool with these parameters: ${JSON.stringify(toolSelection.args)}. This tool may modify files or system state. Would you like me to proceed? (Please respond with 'yes' to continue or 'no' to cancel)`;
+              
+              const openaiResponse = {
+                id: `chatcmpl-${Date.now()}`,
+                object: 'chat.completion',
+                created: Math.floor(Date.now() / 1000),
+                model: this.config.ollama.model,
+                choices: [{
+                  index: 0,
+                  message: {
+                    role: 'assistant',
+                    content: permissionMessage
+                  },
+                  finish_reason: 'stop'
+                }]
+              };
+              
+              return res.json(openaiResponse);
+            }
           }
         }
         
@@ -554,10 +628,68 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
     return tools;
   }
 
+  private getOpenAITools(): OpenAITool[] {
+    logger.debug(`DEBUG: Getting OpenAI tools, schemasInitialized=${this.schemasInitialized}, schemas.size=${this.mcpToolSchemas.size}`);
+    
+    // Return cached real MCP schemas with usage guidance if available
+    if (this.schemasInitialized && this.mcpToolSchemas.size > 0) {
+      const tools = Array.from(this.mcpToolSchemas.values()).map(schema => 
+        this.enhanceToolWithUsageGuidance(schema)
+      );
+      
+      logger.debug(`DEBUG: Returning ${tools.length} enhanced tools`);
+      logger.debug(`DEBUG: Tool names: ${tools.map(t => t.function.name).join(', ')}`);
+      
+      // Check if the first tool has usage guidance
+      if (tools.length > 0) {
+        logger.debug(`DEBUG: First tool enhanced description: ${tools[0].function.description}`);
+      }
+      
+      return tools;
+    }
+    
+    // Fallback to empty array if schemas not loaded yet
+    logger.warn('MCP schemas not initialized yet, returning empty tools list');
+    return [];
+  }
+
+  private enhanceToolWithUsageGuidance(schema: OpenAITool): OpenAITool {
+    const guidance = this.getToolUsageGuidance(schema.function.name);
+    logger.debug(`DEBUG: Enhancing tool ${schema.function.name}, guidance found: ${guidance ? 'YES' : 'NO'}`);
+    
+    if (!guidance) return schema;
+
+    const enhanced = {
+      ...schema,
+      function: {
+        ...schema.function,
+        description: `${schema.function.description}. ${guidance}`
+      }
+    };
+    
+    logger.debug(`DEBUG: Enhanced ${schema.function.name} description: ${enhanced.function.description}`);
+    return enhanced;
+  }
+
+  private getToolUsageGuidance(toolName: string): string | null {
+    const usageMap: Record<string, string> = {
+      'list_dir': 'USE WHEN: user asks "what files are in", "list files", "show directory contents", "what\'s in this folder"',
+      'find_file': 'USE WHEN: user wants to find specific files by name or pattern like "find *.js files" or "where is config.json"',
+      'read_file_content': 'USE WHEN: user wants to see the contents of a specific file',
+      'search_for_pattern': 'USE WHEN: user wants to search for code patterns or text within files',
+      'get_symbols_overview': 'USE WHEN: user wants to understand the structure/symbols in code files',
+      'find_symbol': 'USE WHEN: user is looking for specific functions, classes, or variables in code',
+      'replace_symbol_body': 'USE WHEN: user wants to modify/replace specific functions or code blocks',
+      'get-library-docs': 'USE WHEN: user asks about documentation for a specific library or framework'
+    };
+    
+    return usageMap[toolName] || null;
+  }
+
   public start(): void {
     const port = process.env.PORT ? parseInt(process.env.PORT) : this.config.hub.port;
     
-    this.app.listen(port, () => {
+    this.app.listen(port, async () => {
       logger.info(`Local MCP Hub started on port ${port}`);
       logger.info(`OpenAI-compatible API available at http://localhost:${port}/v1`);
       logger.info(`Health check: http://localhost:${port}/health`);
@@ -565,6 +697,9 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
       
       // Test Ollama connection on startup
       this.testOllamaConnection();
+      
+      // Initialize MCP tool schemas
+      await this.initializeMCPSchemas();
     });
   }
 
@@ -585,6 +720,179 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
     return Math.ceil(text.length / 4);
   }
 
+  private async initializeMCPSchemas(): Promise<void> {
+    logger.info('Initializing MCP tool schemas...');
+    
+    // Get schemas from each enabled MCP server
+    for (const mcpName of this.config.mcps.enabled) {
+      try {
+        const schemas = await this.getMCPToolSchemas(mcpName);
+        schemas.forEach(schema => {
+          this.mcpToolSchemas.set(schema.function.name, schema);
+        });
+        logger.info(`Loaded ${schemas.length} tool schemas from ${mcpName}`);
+      } catch (error) {
+        logger.error(`Failed to load schemas from ${mcpName}:`, error);
+      }
+    }
+    
+    this.schemasInitialized = true;
+    logger.info(`Total MCP tools loaded: ${this.mcpToolSchemas.size}`);
+  }
+
+  private async getMCPToolSchemas(mcpName: string): Promise<OpenAITool[]> {
+    return new Promise((resolve, reject) => {
+      let mcpCommand: string;
+      let mcpArgs: string[];
+
+      if (mcpName === 'context7') {
+        mcpCommand = 'node';
+        mcpArgs = [path.join(__dirname, '..', 'mcps', 'context7', 'dist', 'index.js')];
+      } else if (mcpName === 'serena') {
+        mcpCommand = path.join(__dirname, '..', 'mcps', 'serena', '.venv', 'bin', 'python');
+        mcpArgs = [
+          path.join(__dirname, '..', 'mcps', 'serena', 'scripts', 'mcp_server.py'),
+          '--context', 'ide-assistant',
+          '--project', path.join(__dirname, '..'),
+          '--transport', 'stdio',
+          '--tool-timeout', '30',
+          '--log-level', 'WARNING'
+        ];
+      } else {
+        reject(new Error(`Unknown MCP server: ${mcpName}`));
+        return;
+      }
+
+      const mcpProcess = spawn(mcpCommand, mcpArgs, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: path.join(__dirname, '..')
+      });
+
+      let responseBuffer = '';
+      let initialized = false;
+      const schemas: OpenAITool[] = [];
+
+      const handleResponse = (data: string) => {
+        responseBuffer += data;
+        const lines = responseBuffer.split('\n');
+        responseBuffer = lines.pop() || '';
+        
+        for (const line of lines) {
+          if (line.trim()) {
+            try {
+              const response = JSON.parse(line);
+              
+              if (response.id === 1 && !initialized) {
+                initialized = true;
+                logger.debug(`${mcpName} MCP server initialized`);
+                
+                // Send initialized notification to complete handshake
+                const initializedNotification = JSON.stringify({
+                  jsonrpc: '2.0',
+                  method: 'notifications/initialized',
+                  params: {}
+                });
+                mcpProcess.stdin?.write(initializedNotification + '\n');
+                logger.debug(`${mcpName} sent initialized notification`);
+              } else if (response.id === 2 && response.result) {
+                // Tools list response
+                const tools = response.result.tools || [];
+                for (const tool of tools) {
+                  schemas.push({
+                    type: 'function',
+                    function: {
+                      name: tool.name,
+                      description: tool.description,
+                      parameters: tool.inputSchema || {
+                        type: 'object',
+                        properties: {},
+                        required: []
+                      }
+                    }
+                  });
+                }
+                resolve(schemas);
+                mcpProcess.kill();
+                return;
+              }
+            } catch (e) {
+              // Ignore JSON parse errors
+            }
+          }
+        }
+      };
+
+      mcpProcess.stdout?.on('data', (data) => {
+        handleResponse(data.toString());
+      });
+
+      mcpProcess.stderr?.on('data', (data) => {
+        const stderr = data.toString();
+        logger.debug(`${mcpName} stderr:`, stderr.trim());
+        
+        // For Serena, wait for language server to be ready before sending tools/list
+        if (mcpName === 'serena' && stderr.includes('Language server initialization completed') && initialized) {
+          logger.info(`${mcpName} language server ready, sending tools/list`);
+          const toolsRequest = JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/list',
+            params: {}
+          });
+          mcpProcess.stdin?.write(toolsRequest + '\n');
+          mcpProcess.stdin?.end();
+        }
+      });
+
+      mcpProcess.on('close', (code) => {
+        if (schemas.length === 0) {
+          reject(new Error(`Failed to get schemas from ${mcpName}`));
+        }
+      });
+
+      mcpProcess.on('error', (error) => {
+        reject(error);
+      });
+
+      // Initialize
+      const initRequest = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: { tools: {} },
+          clientInfo: { name: 'local-mcp-hub', version: '1.0.0' }
+        }
+      });
+
+      mcpProcess.stdin?.write(initRequest + '\n');
+
+      // Request tools list after initialization (except for Serena which waits for language server)
+      setTimeout(() => {
+        if (initialized && mcpName !== 'serena') {
+          const toolsRequest = JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/list',
+            params: {}
+          });
+          mcpProcess.stdin?.write(toolsRequest + '\n');
+          mcpProcess.stdin?.end();
+          logger.debug(`${mcpName} sent tools/list request`);
+        } else if (!initialized) {
+          reject(new Error(`${mcpName} MCP server failed to initialize within timeout`));
+        }
+      }, 3000); // 3 seconds for non-Serena servers
+
+      // Timeout
+      setTimeout(() => {
+        mcpProcess.kill();
+        reject(new Error(`Timeout getting schemas from ${mcpName}`));
+      }, 30000);
+    });
+  }
+
   private async callMCPTool(toolName: string, args: any = {}): Promise<string> {
     // Determine which MCP server to use based on tool name
     let mcpCommand: string;
@@ -595,13 +903,10 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
       mcpCommand = 'node';
       mcpArgs = [path.join(__dirname, '..', 'mcps', 'context7', 'dist', 'index.js')];
     } else {
-      // Serena tool - handle Windows vs Unix paths
-      const isWindows = process.platform === 'win32';
-      const venvDir = isWindows ? 'Scripts' : 'bin';
-      const executable = isWindows ? 'serena-mcp-server.exe' : 'serena-mcp-server';
-      
-      mcpCommand = path.join(__dirname, '..', 'mcps', 'serena', '.venv', venvDir, executable);
+      // Serena tool
+      mcpCommand = path.join(__dirname, '..', 'mcps', 'serena', '.venv', 'bin', 'python');
       mcpArgs = [
+        path.join(__dirname, '..', 'mcps', 'serena', 'scripts', 'mcp_server.py'),
         '--context', 'ide-assistant',
         '--project', path.join(__dirname, '..'),
         '--transport', 'stdio',
@@ -618,20 +923,56 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
 
       let output = '';
       let errorOutput = '';
+      let initialized = false;
+      let responseBuffer = '';
+
+      const handleResponse = (data: string) => {
+        responseBuffer += data;
+        const lines = responseBuffer.split('\n');
+        
+        // Keep the last incomplete line in buffer
+        responseBuffer = lines.pop() || '';
+        
+        for (const line of lines) {
+          if (line.trim()) {
+            try {
+              const response = JSON.parse(line);
+              logger.debug('MCP Response:', response);
+              
+              if (response.id === 1 && !initialized) {
+                // Initialization response
+                initialized = true;
+                logger.info('MCP server initialized successfully');
+              } else if (response.id === 2) {
+                // Tool call response
+                if (response.result) {
+                  resolve(response.result.content || JSON.stringify(response.result));
+                } else if (response.error) {
+                  reject(new Error(`MCP tool error: ${response.error.message}`));
+                } else {
+                  resolve('Tool executed successfully');
+                }
+                return;
+              }
+            } catch (e) {
+              logger.warn('Failed to parse MCP response:', line);
+            }
+          }
+        }
+      };
 
       process.stdout?.on('data', (data) => {
-        output += data.toString();
+        handleResponse(data.toString());
       });
 
       process.stderr?.on('data', (data) => {
         errorOutput += data.toString();
+        logger.debug('MCP stderr:', data.toString());
       });
 
       process.on('close', (code) => {
-        if (code === 0) {
-          resolve(output);
-        } else {
-          reject(new Error(`MCP tool failed: ${errorOutput}`));
+        if (code !== 0 && !initialized) {
+          reject(new Error(`MCP server failed to start: ${errorOutput}`));
         }
       });
 
@@ -639,19 +980,45 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
         reject(error);
       });
 
-      // Send tool request (simplified for now)
-      const toolRequest = JSON.stringify({
-        method: 'tools/call',
+      // Send initialization request first
+      const initRequest = JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
         params: {
-          name: toolName,
-          arguments: args
+          protocolVersion: '2025-06-18',
+          capabilities: {
+            tools: {}
+          },
+          clientInfo: {
+            name: 'local-mcp-hub',
+            version: '1.0.0'
+          }
         }
       });
 
-      process.stdin?.write(toolRequest + '\n');
-      process.stdin?.end();
+      logger.debug('Sending MCP init request:', initRequest);
+      process.stdin?.write(initRequest + '\n');
 
-      // Timeout after 30 seconds
+      // Wait for initialization, then get tools list, then call tool
+      setTimeout(() => {
+        if (initialized) {
+          // First get the tools list to understand the schema
+          const toolsListRequest = JSON.stringify({
+            jsonrpc: '2.0',
+            id: 2,
+            method: 'tools/list',
+            params: {}
+          });
+
+          logger.debug('Sending MCP tools/list request:', toolsListRequest);
+          process.stdin?.write(toolsListRequest + '\n');
+        } else {
+          reject(new Error('MCP server failed to initialize within timeout'));
+        }
+      }, 2000); // Wait 2 seconds for initialization
+
+      // Overall timeout after 30 seconds
       setTimeout(() => {
         process.kill();
         reject(new Error('MCP tool timeout'));
@@ -721,6 +1088,9 @@ ${hubContent.substring(0, 1000)}...
     const lastMessage = messages[messages.length - 1];
     const userRequest = lastMessage.content;
     
+    logger.debug(`DEBUG: User request: "${userRequest}"`);
+    logger.debug(`DEBUG: Number of tools: ${tools.length}`);
+    
     // Create tool descriptions for the LLM
     const toolDescriptions = tools.map(tool => {
       const params = Object.entries(tool.function.parameters.properties || {})
@@ -730,46 +1100,54 @@ ${hubContent.substring(0, 1000)}...
       return `- ${tool.function.name}(${params}): ${tool.function.description}`;
     }).join('\n');
     
-    const toolSelectionPrompt = `You are a helpful assistant that can use tools to help users. 
+    logger.debug(`DEBUG: Tool descriptions length: ${toolDescriptions.length} chars`);
+    logger.debug(`DEBUG: First few tools: ${tools.slice(0, 3).map(t => t.function.name).join(', ')}`);
+    
+    const toolSelectionPrompt = `You are a helpful assistant that can use tools to help users.
 
 User request: "${userRequest}"
 
 Available tools:
 ${toolDescriptions}
 
-Analyze the user's request and determine if any tool should be used. If a tool should be used:
-1. Choose the most appropriate tool
-2. Extract the necessary arguments from the user's request
-3. Respond with JSON in this exact format: {"tool": "tool_name", "args": {"param": "value"}}
+INSTRUCTIONS:
+1. Check if the user's request matches any tool's "USE WHEN" criteria
+2. If a tool matches, respond with: {"tool": "tool_name", "args": {"param": "value"}}
+3. If no tool matches, respond with: {"tool": null}
+4. Extract arguments from the user's request based on the tool's parameter requirements
+5. Use relative paths (e.g., "." for current directory) and appropriate boolean values
 
-If no tool is needed, respond with: {"tool": null}
-
-IMPORTANT: 
-- Only use tools when the user is explicitly asking for file operations, code analysis, or workspace information
-- Extract file paths, patterns, or directory names from the user's message
-- For file paths, use relative paths from the current workspace
-- Respond with ONLY the JSON, no other text
+RESPOND WITH ONLY THE JSON, NO OTHER TEXT.
 
 Response:`;
     
+    logger.debug(`DEBUG: Full tool selection prompt:\n${toolSelectionPrompt}`);
+    logger.debug(`DEBUG: Prompt length: ${toolSelectionPrompt.length} chars`);
+    
     try {
+      logger.debug(`DEBUG: Calling sendToOllama with temp=0.1, maxTokens=200`);
       const response = await this.sendToOllama(toolSelectionPrompt, 0.1, 200);
+      
+      logger.debug(`DEBUG: Raw Ollama response: "${response}"`);
+      logger.debug(`DEBUG: Response length: ${response.length} chars`);
       
       // Clean up the response and try to parse JSON
       const cleanResponse = response.trim().replace(/```json|```/g, '').trim();
       
+      logger.debug(`DEBUG: Cleaned response: "${cleanResponse}"`);
       logger.info(`Tool selection response: ${cleanResponse}`);
       
       const selection = JSON.parse(cleanResponse);
+      logger.debug(`DEBUG: Parsed selection:`, selection);
       
       if (selection.tool && selection.tool !== null) {
-        // Validate that the selected tool exists
+        // Validate that the selected tool exists in our MCP tools
         const selectedTool = tools.find(t => t.function.name === selection.tool);
         if (selectedTool) {
-          logger.info(`LLM selected tool: ${selection.tool} with args:`, selection.args);
+          logger.info(`LLM selected MCP tool: ${selection.tool} with args:`, selection.args);
           return { tool: selection.tool, args: selection.args || {} };
         } else {
-          logger.warn(`LLM selected non-existent tool: ${selection.tool}`);
+          logger.warn(`LLM selected non-existent MCP tool: ${selection.tool}`);
         }
       }
       
@@ -778,6 +1156,34 @@ Response:`;
       logger.error('Error in LLM tool selection:', error);
       return null;
     }
+  }
+
+
+  private isSafeTool(toolName: string): boolean {
+    // Define safe read-only tools that can be auto-executed
+    const safeTools = [
+      'read_file_content',      // Read file contents
+      'list_dir',               // List directory contents  
+      'find_file',              // Find files matching pattern
+      'search_for_pattern',     // Search for code patterns
+      'get_workspace_overview', // Get workspace structure
+      'symbol_overview',        // Get symbol overview
+      'find_symbol',            // Find specific symbols
+      'get_symbol_definition',  // Get symbol definitions
+      'list_symbols_in_file',   // List symbols in file
+      'find_references',        // Find symbol references
+      'search_symbols_in_workspace', // Search symbols across workspace
+      'get_class_hierarchy',    // Get class inheritance
+      'find_implementations',   // Find interface implementations
+      'get_function_calls',     // Get function call graphs
+      'analyze_dependencies',   // Analyze code dependencies
+      'find_similar_code',      // Find similar code patterns
+      'extract_interfaces',     // Extract interface definitions
+      'resolve-library-id',     // Resolve library name to Context7 ID
+      'get-library-docs'        // Fetch library documentation
+    ];
+    
+    return safeTools.includes(toolName);
   }
 
   private async generateResponseWithToolResults(
