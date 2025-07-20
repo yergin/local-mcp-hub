@@ -141,10 +141,47 @@ Ask Continue these questions to see the MCP tools in action:
 
 ## API Endpoints
 
-- `GET /health` - Health check
-- `GET /v1/models` - Available models
-- `POST /v1/chat/completions` - OpenAI-compatible chat endpoint
+- `GET /health` - Health check with Ollama connection status
+- `GET /v1/models` - Available models with tool capabilities
+- `POST /v1/chat/completions` - OpenAI-compatible chat endpoint with MCP tool integration
+- `POST /v1/completions` - Code completion endpoint with FIM (Fill-In-Middle) support
 - `GET /v1/tools` - List available MCP tools
+
+## Advanced Features
+
+### Code Completion & FIM Support
+- **Fill-In-Middle (FIM)**: Supports autocomplete with context-aware completions
+- **Language Detection**: Automatically detects file type from path comments
+- **Context-Aware**: Uses code before/after cursor for intelligent completions
+- **Debug Logging**: First completion request saved to `.tmp/compreq.json`
+
+### Intelligent Tool Selection
+- **Two-Stage Selection**: LLM analyzes user request and selects appropriate tools
+- **Smart Arguments**: Automatically generates tool parameters from user requests
+- **Usage Guidance**: Enhanced tool descriptions with "USE WHEN" criteria
+- **Permission System**: Safe tools auto-execute, unsafe tools require confirmation
+
+### Tool Safety Classification
+**Safe Tools** (auto-executed):
+- All read-only operations (file reading, directory listing, code analysis)
+- Documentation lookups and symbol searches
+- Workspace overviews and dependency analysis
+
+**Unsafe Tools** (require permission):
+- File modifications (`replace_symbol_body`)
+- System state changes
+
+### Enhanced Continue Integration
+- **Streaming Responses**: Word-by-word streaming for better user experience
+- **Advanced CORS**: Comprehensive headers for VS Code extension compatibility
+- **Tool Replacement**: Automatically replaces Continue's tools with MCP tools
+- **Authorization Support**: Handles auth headers from Continue extension
+
+### Debugging & Monitoring
+- **Request Logging**: All requests logged with IP and authorization info
+- **MCP Protocol Tracing**: Full JSON-RPC communication logging
+- **Token Estimation**: Built-in token counting for usage tracking
+- **Error Handling**: Graceful fallbacks when tools fail
 
 ## Development
 
