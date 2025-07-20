@@ -159,7 +159,9 @@ class LocalMCPHub {
         status: 'healthy', 
         timestamp: new Date().toISOString(),
         ollama_host: this.config.ollama.host,
-        mcps_enabled: this.config.mcps.enabled.length
+        mcps_enabled: this.config.mcps.enabled.length,
+        mcp_tools_initialized: this.schemasInitialized,
+        mcp_tools_count: this.mcpToolSchemas.size
       });
     });
 
@@ -189,6 +191,22 @@ class LocalMCPHub {
         if (tools && tools.length > 0) {
           logger.info(`Tools received from Continue: ${tools.length} tools found`);
           logger.debug('Continue tools:', tools.map((t: OpenAITool) => t.function.name));
+          
+          // Check if MCP tools are initialized yet
+          if (!this.schemasInitialized) {
+            logger.warn('MCP tools not yet initialized, sending initialization message');
+            const initMessage = `🔧 Local MCP Hub is still initializing the code analysis tools (Serena & Context7). This usually takes 10-30 seconds after startup. Please try your request again in a moment.
+
+Current status:
+- Hub server: ✅ Running
+- Ollama connection: ✅ Connected  
+- MCP tools: ⏳ Loading...
+
+You can check initialization status at: http://localhost:${this.config.hub.port}/health`;
+
+            this.sendStreamingResponse(res, initMessage);
+            return;
+          }
           
           // Replace Continue's tools with our MCP tools
           const mcpTools = this.getOpenAITools();
