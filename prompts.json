@@ -45,8 +45,7 @@
     "usageHints": {
       "list_dir": "USE WHEN: user asks \"what files are in\", \"list files\", \"show directory contents\", \"what's in this folder\"",
       "find_file": "USE WHEN: user wants to find files by NAME/PATH/EXTENSION only, like \"find config.json\", \"find *.js files\", \"where is package.json\" - NOT for searching file contents",
-      "read_file_content": "USE WHEN: user wants to see the contents of a specific file",
-      "search_for_pattern": "USE WHEN: user wants to search for TEXT/CONTENT/PATTERNS inside files, like \"search for TODO\", \"find all console.log\", \"search for function definitions\", \"search for any text/symbols/characters\" - use this for content searches",
+      "search_for_pattern": "USE WHEN: user wants to search for TEXT/CONTENT/PATTERNS inside files, like \"search for TODO\", \"find all console.log\", \"search for function definitions\", \"search for any text/symbols/characters\" - use this for content searches, OR when user wants to see contents of a specific file, asks what a file does, asks about a file's functionality, or wants to understand a file",
       "get_symbols_overview": "USE WHEN: user wants to understand the structure/symbols in code files",
       "find_symbol": "USE WHEN: user is looking for specific functions, classes, or variables in code",
       "replace_symbol_body": "USE WHEN: user wants to modify/replace specific functions or code blocks",
@@ -54,8 +53,7 @@
     },
     "fastModelTools": [
       "list_dir",
-      "find_file",
-      "read_file_content"
+      "find_file"
     ]
   },
   "responseGeneration": {

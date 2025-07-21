@@ -179,7 +179,16 @@ class LocalMCPHub {
       const configPath = path.join(__dirname, '..', 'config.json');
       const configData = fs.readFileSync(configPath, 'utf-8');
       const config = JSON.parse(configData) as Config;
-      logger.info('Configuration loaded', { ollamaHost: config.ollama.host, port: config.hub.port });
+      
+      // Update logger level based on config and environment variable
+      const logLevel = config.hub.log_level || process.env.LOG_LEVEL || 'info';
+      logger.level = logLevel;
+      
+      logger.info('Configuration loaded', { 
+        ollamaHost: config.ollama.host, 
+        port: config.hub.port,
+        logLevel: logLevel 
+      });
       return config;
     } catch (error) {
       logger.error('Failed to load configuration:', error);
@@ -818,27 +827,8 @@ class LocalMCPHub {
   }
 
   private getAvailableTools(): string[] {
-    const tools: string[] = [];
-    
-    // Check which MCPs are enabled and add their tools
-    if (this.config.mcps.enabled.includes('serena')) {
-      // Serena semantic code tools
-      tools.push(
-        'list_dir', 'find_file', 'symbol_overview', 'find_symbol',
-        'get_symbol_definition', 'list_symbols_in_file', 'find_references',
-        'replace_symbol_body', 'search_for_pattern', 'read_file_content',
-        'get_workspace_overview', 'search_symbols_in_workspace',
-        'get_class_hierarchy', 'find_implementations', 'get_function_calls',
-        'analyze_dependencies', 'find_similar_code', 'extract_interfaces'
-      );
-    }
-    
-    if (this.config.mcps.enabled.includes('context7')) {
-      // Context7 documentation tools
-      tools.push('resolve-library-id', 'get-library-docs');
-    }
-    
-    return tools;
+    // Return actual tool names from loaded MCP schemas
+    return Array.from(this.mcpToolSchemas.keys());
   }
 
   private getOpenAITools(): OpenAITool[] {
@@ -1354,6 +1344,7 @@ ${hubContent.substring(0, 1000)}...
       .replace('{toolNames}', toolNames);
     
     logger.debug(`DEBUG: Stage 1 prompt length: ${toolSelectionPrompt.length} chars`);
+    logger.debug(`DEBUG: Full Stage 1 prompt:\n${toolSelectionPrompt}`);
     
     try {
       // Stage 1: Select the tool using fast model
@@ -1364,8 +1355,16 @@ ${hubContent.substring(0, 1000)}...
       const cleanToolResponse = toolResponse.trim().replace(/```json|```/g, '').trim();
       
       logger.debug(`DEBUG: Stage 1 response: "${cleanToolResponse}"`);
+      logger.info(`RAW LLM RESPONSE: "${toolResponse}"`);
+      logger.info(`CLEANED RESPONSE: "${cleanToolResponse}"`);
       
-      const toolSelection = JSON.parse(cleanToolResponse);
+      let toolSelection;
+      try {
+        toolSelection = JSON.parse(cleanToolResponse);
+      } catch (parseError) {
+        logger.error(`Failed to parse tool selection JSON: ${parseError}`, { response: cleanToolResponse });
+        return null;
+      }
       
       if (!toolSelection.tool || toolSelection.tool === null) {
         logger.info('No tool selected by LLM');
@@ -1410,25 +1409,18 @@ ${hubContent.substring(0, 1000)}...
 
 
   private isSafeTool(toolName: string): boolean {
-    // Define safe read-only tools that can be auto-executed
+    // Define safe read-only tools that can be auto-executed (only actual MCP tools)
     const safeTools = [
-      'read_file_content',      // Read file contents
       'list_dir',               // List directory contents  
       'find_file',              // Find files matching pattern
       'search_for_pattern',     // Search for code patterns
-      'get_workspace_overview', // Get workspace structure
-      'symbol_overview',        // Get symbol overview
+      'get_symbols_overview',   // Get symbol overview
       'find_symbol',            // Find specific symbols
-      'get_symbol_definition',  // Get symbol definitions
-      'list_symbols_in_file',   // List symbols in file
-      'find_references',        // Find symbol references
-      'search_symbols_in_workspace', // Search symbols across workspace
-      'get_class_hierarchy',    // Get class inheritance
-      'find_implementations',   // Find interface implementations
-      'get_function_calls',     // Get function call graphs
-      'analyze_dependencies',   // Analyze code dependencies
-      'find_similar_code',      // Find similar code patterns
-      'extract_interfaces',     // Extract interface definitions
+      'find_referencing_symbols', // Find symbol references
+      'read_memory',            // Read memory files
+      'list_memories',          // List memory files
+      'get_current_config',     // Get current configuration
+      'check_onboarding_performed', // Check onboarding status
       'resolve-library-id',     // Resolve library name to Context7 ID
       'get-library-docs'        // Fetch library documentation
     ];
@@ -1441,7 +1433,7 @@ ${hubContent.substring(0, 1000)}...
   }
 
   private requiresComplexReasoning(toolName: string): boolean {
-    // Explicit blacklist of tools requiring sophisticated reasoning
+    // Explicit list of tools requiring sophisticated reasoning (only actual MCP tools)
     const COMPLEX_REASONING_TOOLS = [
       'search_for_pattern',       // Regex generation + file filtering logic
       'replace_regex',            // Regex replacement patterns  
