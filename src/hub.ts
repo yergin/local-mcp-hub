@@ -1560,11 +1560,24 @@ ${hubContent.substring(0, 1000)}...
     let prompt = this.convertMessagesToPrompt(userMessages);
     
     if (toolResults.length > 0) {
-      prompt += '\n\nTool Results:\n';
+      prompt += '\n\nTool Execution Results:\n';
       toolResults.forEach((result, index) => {
-        prompt += `Result ${index + 1}: ${result.content}\n`;
+        const toolName = result.name || 'unknown_tool';
+        const resultContent = result.content || '';
+        const isEmpty = !resultContent.trim() || resultContent.length < 5;
+        
+        prompt += `Tool ${index + 1}: ${toolName}\n`;
+        if (isEmpty) {
+          prompt += `Status: Executed successfully but returned no results\n`;
+        } else {
+          prompt += `Status: Executed successfully with results\n`;
+          prompt += `Output: ${resultContent}\n`;
+        }
+        prompt += '\n';
       });
-      prompt += '\nBased on the tool results above, provide a helpful and accurate response to the user. Summarize the information clearly and answer their question.';
+      prompt += 'IMPORTANT: The tools above were executed on your codebase. ' +
+                'Even if a tool returned no results, it means the operation was performed successfully. ' +
+                'Based on the tool execution results above, provide a helpful and accurate response to the user.';
     }
     
     logger.debug('FINAL RESPONSE PROMPT DEBUG', {
