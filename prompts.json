@@ -57,5 +57,24 @@
       "find_file",
       "read_file_content"
     ]
+  },
+  "responseGeneration": {
+    "toolResultsStreaming": {
+      "template": "Tool Execution Results:\n{toolResults}\nIMPORTANT: The tools above were executed on your codebase. Even if a tool returned no results, it means the operation was performed successfully. Based on the tool execution results above, provide a helpful and accurate response to the user."
+    },
+    "toolResultsNonStreaming": {
+      "template": "Tool Results:\n{toolResults}\nBased on the tool results above, provide a helpful and accurate response to the user. Summarize the information clearly and answer their question."
+    }
+  },
+  "systemMessages": {
+    "mcpInitializing": {
+      "template": "Local MCP Hub is still initializing the code analysis tools (Serena & Context7). This usually takes 10-30 seconds after startup. Please try your request again in a moment.\n\nCurrent status:\n- Hub server: Running\n- Ollama connection: Connected\n- MCP tools: Loading...\n\nYou can check initialization status at: http://localhost:{port}/health"
+    },
+    "toolPermissionError": {
+      "template": "I'd like to use the {toolName} tool to answer your question, but I encountered an error: {error}. Would you like me to try a different approach?"
+    },
+    "toolPermissionRequest": {
+      "template": "I'd like to use the {toolName} tool with these parameters: {args}. This tool may modify files or system state. Would you like me to proceed? (Please respond with 'yes' to continue or 'no' to cancel)"
+    }
   }
 }

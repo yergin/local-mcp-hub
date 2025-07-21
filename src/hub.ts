@@ -33,6 +33,15 @@ interface PromptsConfig {
     usageHints?: Record<string, string>;
     fastModelTools?: string[];
   };
+  responseGeneration?: {
+    toolResultsStreaming?: { template?: string };
+    toolResultsNonStreaming?: { template?: string };
+  };
+  systemMessages?: {
+    mcpInitializing?: { template?: string };
+    toolPermissionError?: { template?: string };
+    toolPermissionRequest?: { template?: string };
+  };
 }
 
 // Completion interfaces
@@ -293,14 +302,8 @@ class LocalMCPHub {
           // Check if MCP tools are initialized yet
           if (!this.schemasInitialized) {
             logger.warn('MCP tools not yet initialized, sending initialization message');
-            const initMessage = `Local MCP Hub is still initializing the code analysis tools (Serena & Context7). This usually takes 10-30 seconds after startup. Please try your request again in a moment.
-
-Current status:
-- Hub server: ✅ Running
-- Ollama connection: ✅ Connected  
-- MCP tools: ⏳ Loading...
-
-You can check initialization status at: http://localhost:${this.config.hub.port}/health`;
+            const initMessage = this.prompts.systemMessages!.mcpInitializing!.template!
+              .replace('{port}', this.config.hub.port.toString());
 
             this.sendStreamingResponse(res, initMessage);
             return;
@@ -357,7 +360,9 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
                 logger.error('Tool execution failed:', toolError);
                 
                 // Fall back to asking for permission
-                const permissionResponse = `I'd like to use the ${toolSelection.tool} tool to answer your question, but I encountered an error: ${toolError instanceof Error ? toolError.message : 'Unknown error'}. Would you like me to try a different approach?`;
+                const permissionResponse = this.prompts.systemMessages!.toolPermissionError!.template!
+                  .replace('{toolName}', toolSelection.tool)
+                  .replace('{error}', toolError instanceof Error ? toolError.message : 'Unknown error');
                 
                 this.sendStreamingResponse(res, permissionResponse);
                 return;
@@ -367,7 +372,9 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
               // Ask for permission for potentially unsafe tools
               logger.info(`Asking permission for potentially unsafe tool: ${toolSelection.tool}`);
               
-              const permissionMessage = `I'd like to use the ${toolSelection.tool} tool with these parameters: ${JSON.stringify(toolSelection.args)}. This tool may modify files or system state. Would you like me to proceed? (Please respond with 'yes' to continue or 'no' to cancel)`;
+              const permissionMessage = this.prompts.systemMessages!.toolPermissionRequest!.template!
+                .replace('{toolName}', toolSelection.tool)
+                .replace('{args}', JSON.stringify(toolSelection.args));
               
               this.sendStreamingResponse(res, permissionMessage);
               return;
@@ -1540,7 +1547,7 @@ ${hubContent.substring(0, 1000)}...
       toolResults.forEach((result, index) => {
         prompt += `Result ${index + 1}: ${result.content}\n`;
       });
-      prompt += '\nBased on the tool results above, provide a helpful and accurate response to the user. Summarize the information clearly and answer their question.';
+      prompt += '\n' + this.prompts.responseGeneration!.toolResultsNonStreaming!.template!;
     }
     
     return await this.sendToOllama(prompt, temperature, maxTokens);
@@ -1575,9 +1582,7 @@ ${hubContent.substring(0, 1000)}...
         }
         prompt += '\n';
       });
-      prompt += 'IMPORTANT: The tools above were executed on your codebase. ' +
-                'Even if a tool returned no results, it means the operation was performed successfully. ' +
-                'Based on the tool execution results above, provide a helpful and accurate response to the user.';
+      prompt += this.prompts.responseGeneration!.toolResultsStreaming!.template!;
     }
     
     logger.debug('FINAL RESPONSE PROMPT DEBUG', {
