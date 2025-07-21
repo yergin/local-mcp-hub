@@ -130,6 +130,24 @@ Dev Machine                    Remote Server
 }
 ```
 
+### Prompts Configuration (`prompts.json`)
+
+All AI prompts are configurable with temperature, token limits, and model selection:
+
+```json
+{
+  "toolSelection": {
+    "stage1": { "template": "...", "temperature": 0.1, "maxTokens": 100, "useFastModel": true }
+  },
+  "argumentGeneration": {
+    "fastModel": { "template": "...", "temperature": 0.1, "maxTokens": 100, "useFastModel": true },
+    "fullModel": { "template": "...", "temperature": 0.1, "maxTokens": 150, "useFastModel": false }
+  }
+}
+```
+
+**Hot reload prompts**: `curl -X POST http://localhost:3002/v1/admin/reload-prompts`
+
 ## Usage Examples
 
 Ask Continue these questions to see the MCP tools in action:
@@ -146,6 +164,7 @@ Ask Continue these questions to see the MCP tools in action:
 - `POST /v1/chat/completions` - OpenAI-compatible chat endpoint with MCP tool integration
 - `POST /v1/completions` - Code completion endpoint with FIM (Fill-In-Middle) support
 - `GET /v1/tools` - List available MCP tools
+- `POST /v1/admin/reload-prompts` - Reload prompt configuration from `prompts.json`
 
 ## Advanced Features
 
