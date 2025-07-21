@@ -1,7 +1,8 @@
 {
   "ollama": {
     "host": "http://10.0.0.24:11434",
-    "model": "qwen2.5:latest"
+    "model": "qwen2.5:latest",
+    "fast_model": "qwen2.5:0.5b"
   },
   "hub": {
     "port": 3002,

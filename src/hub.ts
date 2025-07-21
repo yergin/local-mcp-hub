@@ -52,6 +52,7 @@ interface Config {
   ollama: {
     host: string;
     model: string;
+    fast_model: string;
   };
   hub: {
     port: number;
@@ -449,7 +450,8 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
       .join('\n\n');
   }
 
-  private async sendToOllama(prompt: string, temperature: number, maxTokens: number): Promise<string> {
+  private async sendToOllama(prompt: string, temperature: number, maxTokens: number, useFastModel: boolean = false): Promise<string> {
+    const model = useFastModel ? this.config.ollama.fast_model : this.config.ollama.model;
     try {
       const response = await fetch(`${this.config.ollama.host}/api/generate`, {
         method: 'POST',
@@ -457,7 +459,7 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: this.config.ollama.model,
+          model: model,
           prompt: prompt,
           stream: false,
           options: {
@@ -479,7 +481,7 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
 
       return data.response;
     } catch (error) {
-      logger.error('Failed to communicate with Ollama:', error);
+      logger.error(`Failed to communicate with Ollama (${model}):`, error);
       throw error;
     }
   }
@@ -685,12 +687,20 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
   private async testOllamaConnection(): Promise<void> {
     try {
       logger.info('Testing connection to remote Ollama...');
-      const response = await this.sendToOllama('Hello, this is a connection test.', 0.7, 100);
-      logger.info('✓ Ollama connection successful');
+      
+      // Test main model
+      const response = await this.sendToOllama('Hello, this is a connection test.', 0.7, 100, false);
+      logger.info(`✓ Main model (${this.config.ollama.model}) connection successful`);
       logger.info(`✓ Response: ${response.substring(0, 100)}...`);
+      
+      // Test fast model
+      const fastResponse = await this.sendToOllama('Test', 0.7, 50, true);
+      logger.info(`✓ Fast model (${this.config.ollama.fast_model}) connection successful`);
+      logger.info(`✓ Fast response: ${fastResponse.substring(0, 50)}...`);
+      
     } catch (error) {
       logger.error('✗ Failed to connect to Ollama:', error);
-      logger.error('Please ensure Ollama is running on the remote server');
+      logger.error('Please ensure Ollama is running on the remote server and both models are available');
     }
   }
 
@@ -1112,10 +1122,10 @@ Response:`;
     logger.debug(`DEBUG: Stage 1 prompt length: ${toolSelectionPrompt.length} chars`);
     
     try {
-      // Stage 1: Select the tool
+      // Stage 1: Select the tool using fast model
       const stage1StartTime = Date.now();
-      const toolResponse = await this.sendToOllama(toolSelectionPrompt, 0.1, 100);
-      logger.info(`⏱️ TIMING: Stage 1 tool selection Ollama call completed in ${Date.now() - stage1StartTime}ms`);
+      const toolResponse = await this.sendToOllama(toolSelectionPrompt, 0.1, 100, true);
+      logger.info(`⏱️ TIMING: Stage 1 tool selection (fast model) completed in ${Date.now() - stage1StartTime}ms`);
       const cleanToolResponse = toolResponse.trim().replace(/```json|```/g, '').trim();
       
       logger.debug(`DEBUG: Stage 1 response: "${cleanToolResponse}"`);
@@ -1163,8 +1173,8 @@ Response:`;
       logger.debug(`DEBUG: Stage 2 prompt length: ${argsPrompt.length} chars`);
       
       const stage2StartTime = Date.now();
-      const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 150);
-      logger.info(`⏱️ TIMING: Stage 2 argument generation Ollama call completed in ${Date.now() - stage2StartTime}ms`);
+      const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 150, false);
+      logger.info(`⏱️ TIMING: Stage 2 argument generation (full model) completed in ${Date.now() - stage2StartTime}ms`);
       const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
       
       logger.debug(`DEBUG: Stage 2 response: "${cleanArgsResponse}"`);
