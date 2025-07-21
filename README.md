@@ -1,34 +1,195 @@
 # Local MCP Hub
 
-A portable MCP (Model Context Protocol) hub that runs locally on development machines while connecting to a remote Ollama server. Provides AI coding assistance with access to local code analysis and documentation tools.
+A portable Model Context Protocol (MCP) hub that bridges VS Code Continue extension with remote Ollama servers and local MCP tools. This project enables seamless AI-assisted development with access to powerful code analysis tools and documentation lookup capabilities.
+
+**Note: This project is entirely written by human-guided AI.**
 
 ## Architecture
 
 ```
-Dev Machine                    Remote Server
-┌─────────────────────────┐    ┌─────────────────┐
-│ Local MCP Hub           │    │ Ollama Server   │
-│ ├── Serena (Code)       │◄──►│ qwen2.5:latest  │
-│ ├── Context7 (Docs)     │    │ Port 11434      │
-│ └── OpenAI API (3002)   │    └─────────────────┘
-└─────────────────────────┘
-         ▲
-         │
-┌─────────────────────────┐
-│ Continue Extension      │
-│ VS Code                 │
-└─────────────────────────┘
+┌─────────────────┐    HTTP/OpenAI API      ┌─────────────────┐    HTTP API      ┌─────────────────┐
+│   VS Code       │ ◄─────────────────────► │  Local MCP Hub  │ ◄──────────────► │  Ollama Server  │
+│ Continue Ext.   │                         │                 │                  │ (Local/Remote)  │
+└─────────────────┘                         │                 │                  └─────────────────┘
+                                            │                 │
+                                            │     ┌───────────▼──────────┐
+                                            │     │    MCP Processes     │
+                                            │     │                      │
+                                            │     │  ┌─────────────────┐ │
+                                            │     │  │     Serena      │ │
+                                            │     │  │ (Code Analysis) │ │
+                                            │     │  └─────────────────┘ │
+                                            │     │                      │
+                                            │     │  ┌─────────────────┐ │
+                                            │     │  │    Context7     │ │
+                                            │     │  │ (Library Docs)  │ │
+                                            │     │  └─────────────────┘ │
+                                            │     └──────────────────────┘
+                                            └─────────────────┘
 ```
 
-## Features
+## Key Features
 
-- 🔧 **Local Code Analysis**: 18 Serena tools for semantic code understanding
-- 📚 **Documentation Search**: 2 Context7 tools for up-to-date library docs  
-- 🌐 **Remote AI Processing**: Connects to remote Ollama server for model inference
-- 🔌 **Continue Integration**: OpenAI-compatible API for VS Code Continue extension
-- 📦 **Auto-Installer**: One-command setup that downloads and configures all dependencies
-- 🖥️ **Cross-Platform**: Works on Mac, Windows, and Linux
-- ⚡ **Portable**: Easy deployment across multiple development machines
+- **OpenAI API Compatibility**: Drop-in replacement for OpenAI API with Continue extension
+- **Remote Ollama Support**: Connect to Ollama servers running on different machines
+- **Dual Model Architecture**: Separate fast and full models for optimal performance
+- **MCP Tool Integration**: Access to advanced code analysis via Serena MCP server
+- **Library Documentation**: Context7 integration for instant access to library docs
+- **Intelligent Tool Selection**: Two-stage LLM process for smart tool selection and argument generation
+- **Streaming Responses**: Real-time response streaming for better user experience
+- **Code Completion**: Fill-in-middle (FIM) support for autocomplete functionality
+- **Request Logging**: Comprehensive logging with configurable levels
+
+## Prerequisites
+
+- **Node.js** 18+ and npm
+- **Python** 3.9+ (for Serena MCP server)
+- **Ollama** server running locally or remotely
+- **VS Code** with Continue extension installed
+
+## Installation
+
+### Clone Repository
+
+```bash
+git clone https://github.com/your-repo/local-mcp-hub
+cd local-mcp-hub
+```
+
+### Platform-Specific Installation
+
+#### Linux/macOS
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+#### macOS (Alternative)
+```bash
+chmod +x install-mac.sh
+./install-mac.sh
+```
+
+#### Windows
+```batch
+install.bat
+```
+
+### Configure Ollama Server
+
+Edit `config.json` to point to your Ollama server:
+
+```json
+{
+  "ollama": {
+    "host": "http://your-ollama-server:11434",
+    "model": "qwen2.5:latest",
+    "fast_model": "qwen2.5:0.5b"
+  }
+}
+```
+
+### Start the Hub
+
+```bash
+npm start
+```
+
+The hub will start on port 3002 by default.
+
+### Configure Continue Extension
+
+Copy the contents of `continue-config.yaml` to your Continue extension configuration file:
+
+**Linux/macOS**: `~/.continue/config.yaml`
+**Windows**: `%USERPROFILE%\.continue\config.yaml`
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Server port | 3002 |
+| `LOG_LEVEL` | Logging level (debug, info, warn, error) | info |
+
+## Configuration Files
+
+### config.json
+
+Main configuration file controlling:
+
+- **ollama**: Ollama server connection and model settings
+- **hub**: Server port, logging, and CORS configuration  
+- **mcps**: Enabled MCP servers list
+
+### prompts.json
+
+Advanced prompt configuration for:
+
+- **connectionTest**: Ollama connection verification prompts
+- **toolSelection**: Tool selection logic and templates
+- **argumentGeneration**: Argument generation for fast/full models
+- **codeCompletion**: Code completion prompt templates
+- **toolGuidance**: Usage hints and model routing for tools
+- **responseGeneration**: Response templates for tool results
+- **systemMessages**: User-facing messages for various states
+
+## API Endpoints
+
+### Core OpenAI Compatible Endpoints
+
+- `POST /v1/chat/completions` - Chat completions with tool support
+- `POST /v1/completions` - Code completions (FIM support)
+- `GET /v1/models` - Available models list
+
+### Administrative Endpoints
+
+- `GET /health` - Health check and initialization status
+- `GET /v1/tools` - List available MCP tools
+- `POST /v1/admin/reload-prompts` - Reload prompt configuration
+
+### Health Check Response
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2025-01-20T10:30:00.000Z",
+  "ollama_host": "http://10.0.0.24:11434",
+  "mcps_enabled": 2,
+  "mcp_tools_initialized": true,
+  "mcp_tools_count": 15
+}
+```
+
+## Logging
+
+Logs are written to:
+- **Console**: Colored, human-readable format
+- **File**: `.tmp/local-mcp-hub.log` in JSON format
+
+Key log categories:
+- HTTP requests and responses
+- MCP tool calls and results
+- Ollama communication
+- Performance timing data
+- Error tracking and debugging
+
+## Project Structure
+
+```
+local-mcp-hub/
+├── src/
+│   └── hub.ts              # Main application server
+├── mcps/                   # MCP server implementations (downloaded during installation)
+│   ├── serena/             # Code analysis MCP server
+│   └── context7/           # Library documentation MCP server
+├── config.json             # Main configuration
+├── prompts.json            # Prompt templates and tool guidance
+├── continue-config.yaml    # Continue extension configuration
+├── install.sh              # Linux/macOS installer
+├── install-mac.sh          # macOS-specific installer
+├── install.bat             # Windows installer
+└── .tmp/                   # Runtime logs and debug files (created when run)
+```
 
 ## Available Tools
 
@@ -64,242 +225,65 @@ Dev Machine                    Remote Server
 | `resolve-library-id` | Resolves a package/product name to a Context7-compatible library ID and returns a list of matching libraries.  You MUST call this function before 'get-library-docs' to obtain a valid Context7-compatible library ID UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.  Selection Process: 1. Analyze the query to understand what library/package the user is looking for 2. Return the most relevant match based on: - Name similarity to the query (exact matches prioritized) - Description relevance to the query's intent - Documentation coverage (prioritize libraries with higher Code Snippet counts) - Trust score (consider libraries with scores of 7-10 more authoritative)  Response Format: - Return the selected library ID in a clearly marked section - Provide a brief explanation for why this library was chosen - If multiple good matches exist, acknowledge this but proceed with the most relevant one - If no good matches exist, clearly state this and suggest query refinements  For ambiguous queries, request clarification before proceeding with a best-guess match. |
 | `get-library-docs` | Fetches up-to-date documentation for a library. You must call 'resolve-library-id' first to obtain the exact Context7-compatible library ID required to use this tool, UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query. |
 
-## Quick Start
-
-### Prerequisites
-
-- Node.js (v18+)
-- Python 3.8+
-- Git
-- Remote Ollama server running `qwen2.5:latest`
-
-### Installation
-
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd local-mcp-hub
-   ```
-
-2. **Run the installer for your platform:**
-
-   **Linux:**
-   ```bash
-   ./install.sh
-   ```
-
-   **macOS:**
-   ```bash
-   ./install-mac.sh
-   ```
-
-   **Windows:**
-   ```cmd
-   install.bat
-   ```
-
-3. **Configure the Ollama server connection:**
-   
-   Edit `config.json` and update the Ollama host to match your server:
-   ```json
-   {
-     "ollama": {
-       "host": "http://YOUR_OLLAMA_SERVER:11434",
-       "model": "qwen2.5:latest"
-     }
-   }
-   ```
-
-4. **Start the hub:**
-   ```bash
-   npm start
-   ```
-
-5. **Configure Continue extension** in VS Code:
-   ```yaml
-   models:
-     - name: "Local MCP Hub + Qwen2.5"
-       provider: openai
-       model: "qwen2.5:latest" 
-       apiBase: "http://localhost:3002/v1"
-       apiKey: "dummy-key"
-   ```
-
-## Configuration
-
-### Environment Variables
-
-- `PORT`: Override default port (3002)
-- Example: `PORT=3003 npm start`
-
-### Config File (`config.json`)
-
-```json
-{
-  "ollama": {
-    "host": "http://10.0.0.24:11434",
-    "model": "qwen2.5:latest"
-  },
-  "hub": {
-    "port": 3002,
-    "log_level": "info",
-    "cors_origins": ["*"]
-  },
-  "mcps": {
-    "enabled": ["serena", "context7"]
-  }
-}
-```
-
-### Prompts Configuration (`prompts.json`)
-
-All AI prompts are configurable with temperature, token limits, and model selection:
-
-```json
-{
-  "toolSelection": {
-    "stage1": { "template": "...", "temperature": 0.1, "maxTokens": 100, "useFastModel": true }
-  },
-  "argumentGeneration": {
-    "fastModel": { "template": "...", "temperature": 0.1, "maxTokens": 100, "useFastModel": true },
-    "fullModel": { "template": "...", "temperature": 0.1, "maxTokens": 150, "useFastModel": false }
-  }
-}
-```
-
-**Hot reload prompts**: `curl -X POST http://localhost:3002/v1/admin/reload-prompts`
-
-## Usage Examples
-
-Ask Continue these questions to see the MCP tools in action:
-
-- *"Can you analyze the LocalMCPHub class in my codebase? Show me its methods."*
-- *"What files are in my src directory and how is the project structured?"*
-- *"How does the sendToOllama method work and what error handling does it have?"*
-- *"Find documentation for the latest React hooks API"* (uses Context7)
-
-## API Endpoints
-
-- `GET /health` - Health check with Ollama connection status
-- `GET /v1/models` - Available models with tool capabilities
-- `POST /v1/chat/completions` - OpenAI-compatible chat endpoint with MCP tool integration
-- `POST /v1/completions` - Code completion endpoint with FIM (Fill-In-Middle) support
-- `GET /v1/tools` - List available MCP tools
-- `POST /v1/admin/reload-prompts` - Reload prompt configuration from `prompts.json`
-
-## Advanced Features
-
-### Code Completion & FIM Support
-- **Fill-In-Middle (FIM)**: Supports autocomplete with context-aware completions
-- **Language Detection**: Automatically detects file type from path comments
-- **Context-Aware**: Uses code before/after cursor for intelligent completions
-- **Debug Logging**: First completion request saved to `.tmp/compreq.json`
-
-### Intelligent Tool Selection
-- **Two-Stage Selection**: LLM analyzes user request and selects appropriate tools
-- **Smart Arguments**: Automatically generates tool parameters from user requests
-- **Usage Guidance**: Enhanced tool descriptions with "USE WHEN" criteria
-- **Permission System**: Safe tools auto-execute, unsafe tools require confirmation
-
-### Tool Safety Classification
-**Safe Tools** (auto-executed):
-- All read-only operations (file reading, directory listing, code analysis)
-- Documentation lookups and symbol searches
-- Workspace overviews and dependency analysis
-
-**Unsafe Tools** (require permission):
-- File modifications (`replace_symbol_body`)
-- System state changes
-
-### Enhanced Continue Integration
-- **Streaming Responses**: Word-by-word streaming for better user experience
-- **Advanced CORS**: Comprehensive headers for VS Code extension compatibility
-- **Tool Replacement**: Automatically replaces Continue's tools with MCP tools
-- **Authorization Support**: Handles auth headers from Continue extension
-
-### Debugging & Monitoring
-- **Request Logging**: All requests logged with IP and authorization info
-- **MCP Protocol Tracing**: Full JSON-RPC communication logging
-- **Token Estimation**: Built-in token counting for usage tracking
-- **Error Handling**: Graceful fallbacks when tools fail
-
-## Development
-
-### Project Structure
-
-```
-local-mcp-hub/
-├── src/
-│   └── hub.ts              # Main hub implementation
-├── mcps/                   # Auto-downloaded MCPs
-│   ├── serena/            # Code analysis toolkit
-│   └── context7/          # Documentation search
-├── install.sh             # Auto-installer
-├── config.json           # Configuration
-└── continue-config.yaml   # Continue extension template
-```
-
-### Running in Development
-
-```bash
-npm run dev     # Start with ts-node
-npm run build   # Build TypeScript
-npm test        # Run tests
-```
-
-### Logs
-
-Check `local-mcp-hub.log` for detailed logs including:
-- MCP tool usage
-- Ollama communication
-- Continue extension requests
-
 ## Troubleshooting
 
-### Port Already in Use
-```bash
-PORT=3003 npm start
+### Common Issues
+
+**Hub won't start**
+- Check if port 3002 is available
+- Verify Node.js version is 18+
+- Check config.json syntax
+
+**Ollama connection failed**
+- Verify Ollama server is running
+- Check network connectivity to remote host
+- Confirm model names exist on Ollama server
+
+**MCP tools not working**
+- Check `.tmp/local-mcp-hub.log` for MCP process errors
+- Verify Python environment for Serena (requires Python 3.9+)
+- Ensure all dependencies are installed
+
+**Continue extension not connecting**
+- Verify Continue config.yaml matches provided template
+- Check VS Code developer console for errors
+- Confirm hub health endpoint responds: `http://localhost:3002/health`
+
+### Debug Mode
+
+Enable debug logging in config.json:
+
+```json
+{
+  "hub": {
+    "log_level": "debug"
+  }
+}
 ```
 
-### Continue Extension Not Connecting
-1. Ensure hub is running: `curl http://localhost:3002/health`
-2. Check Continue config uses correct port
-3. Verify Continue extension is reloaded
-
-### MCP Tools Not Working
-1. Check `mcps/` directory exists with serena and context7
-2. Run `./install.sh` again to re-download
-3. Verify Python virtual environment: `mcps/serena/.venv/`
-
-### Ollama Connection Issues
-1. **Update `config.json`** with correct Ollama server address:
-   ```json
-   {
-     "ollama": {
-       "host": "http://YOUR_OLLAMA_SERVER:11434",
-       "model": "qwen2.5:latest"
-     }
-   }
-   ```
-2. Test direct connection: `curl http://your-server:11434/api/tags`
-3. Ensure qwen2.5:latest model is installed on server
-4. Check firewall settings allow access to port 11434
+Or set environment variable:
+```bash
+LOG_LEVEL=debug npm start
+```
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Make changes
-4. Test on multiple platforms
+3. Make your changes
+4. Test thoroughly with different Ollama models
 5. Submit a pull request
+
+Please ensure all changes maintain compatibility with the OpenAI API specification and Continue extension requirements.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License - see [LICENSE](LICENSE) file for details.
 
-## Acknowledgments
+## Acknowledgements
 
-- [Serena](https://github.com/oraios/serena) - Semantic code analysis toolkit
-- [Context7](https://github.com/upstash/context7) - Documentation search MCP
 - [Ollama](https://ollama.ai) - Local language model server
 - [Continue](https://continue.dev) - VS Code AI coding assistant
+- [Serena](https://github.com/oraios/serena) - Semantic code analysis toolkit
+- [Context7](https://github.com/upstash/context7) - Documentation search MCP
+- [Model Context Protocol](https://github.com/modelcontextprotocol) - Standardized tool integration protocol

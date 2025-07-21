@@ -55,6 +55,3 @@ experimental:
   enableAgentMode: true
 
 allowAnonymousTelemetry: false
-
-# Available Tools: (will be populated as MCPs are added)
-# Currently: None (basic Ollama connection only)
