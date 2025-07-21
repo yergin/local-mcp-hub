@@ -1407,6 +1407,8 @@ Common patterns:
 - For directory operations: use "." for current directory
 - For file operations: extract filename/pattern from request
 - For boolean flags: true if mentioned (recursive, etc.)
+- OMIT optional parameters that have good defaults unless user specifically requests different values
+- Do NOT include max_answer_chars unless user asks for limited output
 
 Respond ONLY with JSON: {"args": {"param": "value"}}
 
