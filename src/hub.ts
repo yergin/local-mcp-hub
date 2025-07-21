@@ -252,12 +252,11 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
                 ];
                 
                 const finalResponseStartTime = Date.now();
-                const finalResponse = await this.generateResponseWithToolResults(messagesWithTool, temperature, max_tokens);
+                logger.info('🌊 Starting streaming final response generation');
+                await this.generateResponseWithToolResultsStreaming(messagesWithTool, temperature, max_tokens, res);
                 logger.info(`⏱️ TIMING: Final response generation completed in ${Date.now() - finalResponseStartTime}ms`);
                 
                 logger.info(`⏱️ TIMING: Total request processing time: ${Date.now() - startTime}ms`);
-                logger.info('Sending final response with tool results');
-                this.sendStreamingResponse(res, finalResponse);
                 return;
                 
               } catch (toolError) {
@@ -290,11 +289,11 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
         
         // Always send streaming response to Continue (ignoring stream parameter)
         const ollamaStartTime = Date.now();
-        const response = await this.sendToOllama(prompt, temperature, max_tokens);
+        logger.info('🌊 Starting streaming response for regular chat');
+        await this.sendToOllamaStreaming(prompt, temperature, max_tokens, res);
         logger.info(`⏱️ TIMING: Ollama response completed in ${Date.now() - ollamaStartTime}ms`);
         
         logger.info(`⏱️ TIMING: Total request processing time: ${Date.now() - startTime}ms`);
-        this.sendStreamingResponse(res, response);
         
         logger.info('Successfully processed chat completion');
         
@@ -483,6 +482,150 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
     } catch (error) {
       logger.error(`Failed to communicate with Ollama (${model}):`, error);
       throw error;
+    }
+  }
+
+  private async sendToOllamaStreaming(
+    prompt: string, 
+    temperature: number, 
+    maxTokens: number, 
+    res: any,
+    useFastModel: boolean = false
+  ): Promise<void> {
+    const model = useFastModel ? this.config.ollama.fast_model : this.config.ollama.model;
+    
+    try {
+      logger.info('🌊 Starting true streaming response from Ollama');
+      
+      // Set SSE headers immediately
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+      });
+
+      const id = `chatcmpl-${Date.now()}`;
+      const created = Math.floor(Date.now() / 1000);
+      
+      const response = await fetch(`${this.config.ollama.host}/api/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: model,
+          prompt: prompt,
+          stream: true, // Enable true streaming
+          options: {
+            temperature: temperature,
+            num_predict: maxTokens
+          }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
+      }
+
+      if (!response.body) {
+        throw new Error('No response body from Ollama');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let totalTokens = 0;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) break;
+          
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          
+          // Keep the last incomplete line in buffer
+          buffer = lines.pop() || '';
+          
+          for (const line of lines) {
+            if (line.trim()) {
+              try {
+                const data = JSON.parse(line);
+                
+                if (data.response) {
+                  // Send streaming chunk to Continue
+                  const streamChunk = {
+                    id,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model: model,
+                    choices: [{
+                      index: 0,
+                      delta: { content: data.response },
+                      finish_reason: null
+                    }]
+                  };
+                  
+                  res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
+                  totalTokens++;
+                }
+                
+                if (data.done) {
+                  // Send final chunk
+                  const finalChunk = {
+                    id,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model: model,
+                    choices: [{
+                      index: 0,
+                      delta: {},
+                      finish_reason: 'stop'
+                    }],
+                    usage: {
+                      prompt_tokens: this.estimateTokens(prompt),
+                      completion_tokens: totalTokens,
+                      total_tokens: this.estimateTokens(prompt) + totalTokens
+                    }
+                  };
+                  
+                  res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+                  res.write('data: [DONE]\n\n');
+                  res.end();
+                  return;
+                }
+              } catch (e) {
+                logger.warn('Failed to parse Ollama streaming response:', line);
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      
+    } catch (error) {
+      logger.error(`Failed to stream from Ollama (${model}):`, error);
+      
+      // Send error response
+      const errorChunk = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: model,
+        choices: [{
+          index: 0,
+          delta: { content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}` },
+          finish_reason: 'stop'
+        }]
+      };
+      
+      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
     }
   }
 
@@ -1243,6 +1386,30 @@ Response:`;
     }
     
     return await this.sendToOllama(prompt, temperature, maxTokens);
+  }
+
+  private async generateResponseWithToolResultsStreaming(
+    messages: any[], 
+    temperature: number, 
+    maxTokens: number,
+    res: any
+  ): Promise<void> {
+    // Find the tool results in the messages
+    const toolResults = messages.filter(msg => msg.role === 'tool');
+    const userMessages = messages.filter(msg => msg.role !== 'tool');
+    
+    // Create a prompt that includes the tool results
+    let prompt = this.convertMessagesToPrompt(userMessages);
+    
+    if (toolResults.length > 0) {
+      prompt += '\n\nTool Results:\n';
+      toolResults.forEach((result, index) => {
+        prompt += `Result ${index + 1}: ${result.content}\n`;
+      });
+      prompt += '\nBased on the tool results above, provide a helpful and accurate response to the user. Summarize the information clearly and answer their question.';
+    }
+    
+    await this.sendToOllamaStreaming(prompt, temperature, maxTokens, res);
   }
 
   // Completion handler methods
