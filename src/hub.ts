@@ -289,7 +289,7 @@ class LocalMCPHub {
           // Check if MCP tools are initialized yet
           if (!this.schemasInitialized) {
             logger.warn('MCP tools not yet initialized, sending initialization message');
-            const initMessage = `🔧 Local MCP Hub is still initializing the code analysis tools (Serena & Context7). This usually takes 10-30 seconds after startup. Please try your request again in a moment.
+            const initMessage = `Local MCP Hub is still initializing the code analysis tools (Serena & Context7). This usually takes 10-30 seconds after startup. Please try your request again in a moment.
 
 Current status:
 - Hub server: ✅ Running
@@ -1356,7 +1356,7 @@ ${hubContent.substring(0, 1000)}...
       const stage1StartTime = Date.now();
       const stage1Config = this.prompts.toolSelection.stage1;
       const toolResponse = await this.sendToOllama(toolSelectionPrompt, stage1Config.temperature, stage1Config.maxTokens, stage1Config.useFastModel);
-      logger.info(`⏱️ TIMING: Stage 1 tool selection (fast model) completed in ${Date.now() - stage1StartTime}ms`);
+      logTiming(`Stage 1 tool selection (fast model)`, stage1StartTime);
       const cleanToolResponse = toolResponse.trim().replace(/```json|```/g, '').trim();
       
       logger.debug(`DEBUG: Stage 1 response: "${cleanToolResponse}"`);
@@ -1382,7 +1382,7 @@ ${hubContent.substring(0, 1000)}...
       let argsSelection;
       
       if (this.isSimpleArgumentGeneration(toolSelection.tool)) {
-        logger.info(`🏃 Using fast model for simple argument generation: ${toolSelection.tool}`);
+        logger.info('Using fast model for simple argument generation', { tool: toolSelection.tool });
         argsSelection = await this.generateArgsWithFastModel(userRequest, selectedTool);
       } else {
         logger.info(`🧠 Using full model for complex argument generation: ${toolSelection.tool}`);
@@ -1390,7 +1390,7 @@ ${hubContent.substring(0, 1000)}...
       }
       
       const modelType = this.isSimpleArgumentGeneration(toolSelection.tool) ? 'fast model' : 'full model';
-      logger.info(`⏱️ TIMING: Stage 2 argument generation (${modelType}) completed in ${Date.now() - stage2StartTime}ms`);
+      logTiming(`Stage 2 argument generation (${modelType})`, stage2StartTime);
       logger.info(`Stage 2: Generated args: ${JSON.stringify(argsSelection.args)}`);
       
       return { 
