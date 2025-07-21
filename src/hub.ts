@@ -1289,41 +1289,20 @@ Response:`;
       
       logger.info(`Stage 1: LLM selected tool: ${toolSelection.tool}`);
       
-      // Stage 2: Generate arguments for the selected tool
-      const params = Object.entries(selectedTool.function.parameters.properties || {})
-        .map(([name, schema]: [string, any]) => `- ${name} (${schema.type}): ${schema.description || 'No description'}`)
-        .join('\n');
-      
-      const argsPrompt = `You are a helpful assistant that generates tool arguments.
-
-User request: "${userRequest}"
-Selected tool: ${selectedTool.function.name}
-
-Tool description: ${selectedTool.function.description}
-
-Parameters:
-${params}
-
-INSTRUCTIONS:
-1. Extract arguments from the user's request based on the tool's parameter requirements
-2. Use relative paths (e.g., "." for current directory) and appropriate boolean values
-3. Respond with: {"args": {"param1": "value1", "param2": "value2"}}
-
-RESPOND WITH ONLY THE JSON, NO OTHER TEXT.
-
-Response:`;
-      
-      logger.debug(`DEBUG: Stage 2 prompt length: ${argsPrompt.length} chars`);
-      
+      // Stage 2: Generate arguments using smart model selection
       const stage2StartTime = Date.now();
-      const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 150, false);
-      logger.info(`⏱️ TIMING: Stage 2 argument generation (full model) completed in ${Date.now() - stage2StartTime}ms`);
-      const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
+      let argsSelection;
       
-      logger.debug(`DEBUG: Stage 2 response: "${cleanArgsResponse}"`);
+      if (this.isSimpleArgumentGeneration(toolSelection.tool)) {
+        logger.info(`🏃 Using fast model for simple argument generation: ${toolSelection.tool}`);
+        argsSelection = await this.generateArgsWithFastModel(userRequest, selectedTool);
+      } else {
+        logger.info(`🧠 Using full model for complex argument generation: ${toolSelection.tool}`);
+        argsSelection = await this.generateArgsWithFullModel(userRequest, selectedTool);
+      }
       
-      const argsSelection = JSON.parse(cleanArgsResponse);
-      
+      const modelType = this.isSimpleArgumentGeneration(toolSelection.tool) ? 'fast model' : 'full model';
+      logger.info(`⏱️ TIMING: Stage 2 argument generation (${modelType}) completed in ${Date.now() - stage2StartTime}ms`);
       logger.info(`Stage 2: Generated args: ${JSON.stringify(argsSelection.args)}`);
       
       return { 
@@ -1363,6 +1342,120 @@ Response:`;
     ];
     
     return safeTools.includes(toolName);
+  }
+
+  private isSimpleArgumentGeneration(toolName: string): boolean {
+    // Explicit whitelist of tools with predictable, simple arguments
+    const SIMPLE_TOOLS = [
+      'list_dir',               // Always: relative_path + recursive boolean
+      'find_file',              // Always: file_mask + relative_path  
+      'read_file_content',      // Always: just relative_path
+      'write_memory',           // Simple: key + content
+      'read_memory',            // Simple: just key
+      'list_memories',          // Simple: no arguments or basic filtering
+      'delete_memory',          // Simple: just key
+      'get_current_config',     // Simple: no arguments
+      'restart_language_server', // Simple: no/minimal arguments
+      'get_symbols_overview',   // Simple: relative_path parameter only
+      'activate_project',       // Simple: project path
+      'remove_project',         // Simple: project path
+      'resolve-library-id',     // Simple: library name string
+      'get-library-docs'        // Simple: library ID string (after resolve)
+    ];
+    
+    return SIMPLE_TOOLS.includes(toolName);
+  }
+
+  private requiresComplexReasoning(toolName: string): boolean {
+    // Explicit blacklist of tools requiring sophisticated reasoning
+    const COMPLEX_REASONING_TOOLS = [
+      'search_for_pattern',       // Regex generation + file filtering logic
+      'replace_regex',            // Regex replacement patterns  
+      'find_symbol',              // Symbol path matching rules + depth decisions
+      'find_referencing_symbols', // Symbol relationship analysis
+      'replace_symbol_body',      // Code structure understanding + replacement logic
+      'insert_after_symbol',      // Code insertion positioning logic
+      'insert_before_symbol',     // Code insertion positioning logic
+      'switch_modes',             // Complex mode switching logic
+      'onboarding',               // Multi-step process logic
+      'think_about_collected_information', // Complex reasoning tasks
+      'think_about_task_adherence',        // Complex reasoning tasks  
+      'think_about_whether_you_are_done',  // Complex reasoning tasks
+      'summarize_changes',        // Complex analysis and summarization
+      'prepare_for_new_conversation', // Complex state management
+      'initial_instructions'      // Complex initialization logic
+    ];
+    
+    return COMPLEX_REASONING_TOOLS.includes(toolName);
+  }
+
+  private async generateArgsWithFastModel(userRequest: string, toolSchema: OpenAITool): Promise<any> {
+    const params = Object.entries(toolSchema.function.parameters.properties || {})
+      .map(([name, schema]: [string, any]) => `- ${name} (${schema.type}): ${schema.description || 'No description'}`)
+      .join('\n');
+    
+    // Simplified prompt for fast model - focus on pattern recognition
+    const argsPrompt = `Generate tool arguments from user request.
+
+Tool: ${toolSchema.function.name}
+User request: "${userRequest}"
+
+Parameters:
+${params}
+
+Common patterns:
+- For directory operations: use "." for current directory
+- For file operations: extract filename/pattern from request
+- For boolean flags: true if mentioned (recursive, etc.)
+
+Respond ONLY with JSON: {"args": {"param": "value"}}
+
+Response:`;
+    
+    logger.debug(`DEBUG: Fast model Stage 2 prompt length: ${argsPrompt.length} chars`);
+
+    const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 100, true); // Use fast model
+    const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
+    
+    logger.debug(`DEBUG: Fast model Stage 2 response: "${cleanArgsResponse}"`);
+
+    return JSON.parse(cleanArgsResponse);
+  }
+
+  private async generateArgsWithFullModel(userRequest: string, toolSchema: OpenAITool): Promise<any> {
+    const params = Object.entries(toolSchema.function.parameters.properties || {})
+      .map(([name, schema]: [string, any]) => `- ${name} (${schema.type}): ${schema.description || 'No description'}`)
+      .join('\n');
+      
+    // Detailed prompt for full model - comprehensive reasoning
+    const argsPrompt = `You are a helpful assistant that generates tool arguments.
+
+User request: "${userRequest}"
+Selected tool: ${toolSchema.function.name}
+
+Tool description: ${toolSchema.function.description}
+
+Parameters:
+${params}
+
+INSTRUCTIONS:
+1. Extract arguments from the user's request based on the tool's parameter requirements
+2. Use relative paths (e.g., "." for current directory) and appropriate boolean values
+3. For complex tools, carefully consider parameter relationships and validation
+4. Respond with: {"args": {"param1": "value1", "param2": "value2"}}
+
+RESPOND WITH ONLY THE JSON, NO OTHER TEXT.
+
+Response:`;
+    
+    logger.debug(`DEBUG: Full model Stage 2 prompt length: ${argsPrompt.length} chars`);
+    
+    const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 150, false); // Use full model
+    const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
+    
+    logger.debug(`DEBUG: Full model Stage 2 response: "${cleanArgsResponse}"`);
+    
+    return JSON.parse(cleanArgsResponse);
   }
 
   private async generateResponseWithToolResults(
