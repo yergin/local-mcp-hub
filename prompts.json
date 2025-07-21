@@ -25,13 +25,11 @@
     "fastModel": {
       "template": "Generate tool arguments from user request.\n\nTool: {toolName}\nUser request: \"{userRequest}\"\n\nParameters:\n{params}\n\nCommon patterns:\n- For directory operations: use \".\" for current directory\n- For file operations: extract filename/pattern from request\n- For boolean flags: true if mentioned (recursive, etc.)\n- OMIT optional parameters that have good defaults unless user specifically requests different values\n- Do NOT include max_answer_chars unless user asks for limited output\n\nRespond ONLY with JSON: {\"args\": {\"param\": \"value\"}}\n\nResponse:",
       "temperature": 0.1,
-      "maxTokens": 100,
       "useFastModel": true
     },
     "fullModel": {
       "template": "You are a helpful assistant that generates tool arguments.\n\nUser request: \"{userRequest}\"\nSelected tool: {toolName}\n\nTool description: {toolDescription}\n\nParameters:\n{params}\n\nINSTRUCTIONS:\n1. Extract arguments from the user's request based on the tool's parameter requirements\n2. Use relative paths (e.g., \".\" for current directory) and appropriate boolean values\n3. For complex tools, carefully consider parameter relationships and validation\n4. Respond with: {\"args\": {\"param1\": \"value1\", \"param2\": \"value2\"}}\n\nRESPOND WITH ONLY THE JSON, NO OTHER TEXT.\n\nResponse:",
       "temperature": 0.1,
-      "maxTokens": 150,
       "useFastModel": false
     }
   },

@@ -90,6 +90,17 @@ interface Config {
   };
 }
 
+// Helper function for temp directory path (used before class instantiation)
+const getTmpPath = (...segments: string[]): string => {
+  return path.join(__dirname, '..', '.tmp', ...segments);
+};
+
+// Ensure .tmp directory exists for logs
+const tmpDir = getTmpPath();
+if (!fs.existsSync(tmpDir)) {
+  fs.mkdirSync(tmpDir, { recursive: true });
+}
+
 // Logger setup with standardized formatting
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
@@ -111,7 +122,7 @@ const logger = winston.createLogger({
       )
     }),
     new winston.transports.File({ 
-      filename: 'local-mcp-hub.log',
+      filename: getTmpPath('local-mcp-hub.log'),
       format: winston.format.json()
     })
   ]
@@ -145,6 +156,7 @@ class LocalMCPHub {
     this.app = express();
     this.config = this.loadConfig();
     this.prompts = this.loadPrompts();
+    this.ensureTmpDirectory();
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -172,6 +184,18 @@ class LocalMCPHub {
     } catch (error) {
       logger.error('Failed to load prompts configuration:', error);
       process.exit(1);
+    }
+  }
+
+  private getTmpPath(...segments: string[]): string {
+    return path.join(__dirname, '..', '.tmp', ...segments);
+  }
+
+  private ensureTmpDirectory(): void {
+    const tmpDir = this.getTmpPath();
+    if (!fs.existsSync(tmpDir)) {
+      fs.mkdirSync(tmpDir, { recursive: true });
+      logger.debug('Created .tmp directory for debugging files');
     }
   }
 
@@ -378,15 +402,11 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
         logger.info('Received completion request');
         
         // Store first completion request for debugging
-        const tmpDir = path.join(__dirname, '..', '.tmp');
-        const compreqPath = path.join(tmpDir, 'compreq.json');
+        const compreqPath = this.getTmpPath('compreq.json');
         if (!fs.existsSync(compreqPath)) {
-          // Ensure .tmp directory exists
-          if (!fs.existsSync(tmpDir)) {
-            fs.mkdirSync(tmpDir, { recursive: true });
-          }
+          this.ensureTmpDirectory();
           fs.writeFileSync(compreqPath, JSON.stringify(req.body, null, 2));
-          logger.info('Stored completion request to .tmp/compreq.json');
+          logger.debug('Stored completion request for debugging', { path: compreqPath });
         }
         
         const { prompt, max_tokens = 50, temperature = 0.2, stream = false } = req.body;
@@ -532,9 +552,14 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
       .join('\n\n');
   }
 
-  private async sendToOllama(prompt: string, temperature: number, maxTokens: number, useFastModel: boolean = false): Promise<string> {
+  private async sendToOllama(prompt: string, temperature: number, maxTokens?: number, useFastModel: boolean = false): Promise<string> {
     const model = useFastModel ? this.config.ollama.fast_model : this.config.ollama.model;
     try {
+      const options: any = { temperature };
+      if (maxTokens !== undefined) {
+        options.num_predict = maxTokens;
+      }
+
       const response = await fetch(`${this.config.ollama.host}/api/generate`, {
         method: 'POST',
         headers: {
@@ -544,10 +569,7 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
           model: model,
           prompt: prompt,
           stream: false,
-          options: {
-            temperature: temperature,
-            num_predict: maxTokens
-          }
+          options
         })
       });
 
