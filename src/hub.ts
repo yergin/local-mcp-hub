@@ -90,24 +90,47 @@ interface Config {
   };
 }
 
-// Logger setup
+// Logger setup with standardized formatting
 const logger = winston.createLogger({
-  level: 'debug',
+  level: process.env.LOG_LEVEL || 'info',
   format: winston.format.combine(
-    winston.format.timestamp(),
+    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
     winston.format.errors({ stack: true }),
-    winston.format.json()
+    winston.format.printf(({ level, message, timestamp, ...meta }) => {
+      const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : '';
+      return `${timestamp} [${level.toUpperCase()}] ${message}${metaStr}`;
+    })
   ),
   transports: [
     new winston.transports.Console({
       format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
+        winston.format.colorize({ all: true }),
+        winston.format.printf(({ level, message, timestamp }) => {
+          return `${timestamp} [${level}] ${message}`;
+        })
       )
     }),
-    new winston.transports.File({ filename: 'local-mcp-hub.log' })
+    new winston.transports.File({ 
+      filename: 'local-mcp-hub.log',
+      format: winston.format.json()
+    })
   ]
 });
+
+// Helper functions for consistent logging
+const logTiming = (operation: string, startTime: number, metadata?: object) => {
+  const duration = Date.now() - startTime;
+  logger.info(`Timing: ${operation} completed`, { duration: `${duration}ms`, ...metadata });
+};
+
+const logMCPRequest = (mcpName: string, method: string, params: any) => {
+  logger.debug(`MCP ${mcpName}: ${method}`, { params });
+};
+
+const logMCPResponse = (mcpName: string, method: string, success: boolean, data?: any) => {
+  const level = success ? 'debug' : 'error';
+  logger[level](`MCP ${mcpName}: ${method} ${success ? 'succeeded' : 'failed'}`, { data });
+};
 
 class LocalMCPHub {
   private app: express.Application;
@@ -131,7 +154,7 @@ class LocalMCPHub {
       const configPath = path.join(__dirname, '..', 'config.json');
       const configData = fs.readFileSync(configPath, 'utf-8');
       const config = JSON.parse(configData) as Config;
-      logger.info(`Loaded configuration: Ollama at ${config.ollama.host}`);
+      logger.info('Configuration loaded', { ollamaHost: config.ollama.host, port: config.hub.port });
       return config;
     } catch (error) {
       logger.error('Failed to load configuration:', error);
@@ -144,7 +167,7 @@ class LocalMCPHub {
       const promptsPath = path.join(__dirname, '..', 'prompts.json');
       const promptsData = fs.readFileSync(promptsPath, 'utf-8');
       const prompts = JSON.parse(promptsData) as PromptsConfig;
-      logger.info('Loaded prompts configuration');
+      logger.info('Prompts configuration loaded');
       return prompts;
     } catch (error) {
       logger.error('Failed to load prompts configuration:', error);
@@ -188,10 +211,12 @@ class LocalMCPHub {
     
     // Request logging
     this.app.use((req, res, next) => {
-      logger.info(`${req.method} ${req.path} - ${req.ip}`);
-      if (req.headers.authorization) {
-        logger.debug('Authorization header present:', req.headers.authorization.substring(0, 20) + '...');
-      }
+      logger.info('HTTP request', {
+        method: req.method,
+        path: req.path,
+        ip: req.ip,
+        hasAuth: !!req.headers.authorization
+      });
       next();
     });
   }
@@ -213,7 +238,7 @@ class LocalMCPHub {
     this.app.post('/v1/chat/completions', async (req, res) => {
       const startTime = Date.now();
       try {
-        logger.info(`⏱️ TIMING: Chat completion request received at ${startTime}`);
+        logger.info('Chat completion request received');
         logger.debug('Request body:', JSON.stringify(req.body, null, 2));
         
         const { messages, model, temperature = 0.7, max_tokens = 4000, stream = false, tools, tool_choice } = req.body;
@@ -256,13 +281,13 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
           // Replace Continue's tools with our MCP tools
           const toolsStartTime = Date.now();
           const mcpTools = this.getOpenAITools();
-          logger.info(`⏱️ TIMING: Got MCP tools in ${Date.now() - toolsStartTime}ms (${mcpTools.length} tools)`);
-          logger.debug('MCP tools:', mcpTools.map((t: OpenAITool) => t.function.name));
+          logTiming('MCP tools retrieval', toolsStartTime, { toolCount: mcpTools.length });
+          logger.debug('Available MCP tools', { tools: mcpTools.map((t: OpenAITool) => t.function.name) });
           
           const selectionStartTime = Date.now();
           const toolSelection = await this.selectToolWithLLM(messages, mcpTools);
-          logger.info(`⏱️ TIMING: Tool selection completed in ${Date.now() - selectionStartTime}ms`);
-          logger.info(`Tool selection result: ${JSON.stringify(toolSelection)}`);
+          logTiming('Tool selection', selectionStartTime);
+          logger.info('Tool selected', { tool: toolSelection?.tool, hasArgs: !!toolSelection?.args });
           
           if (toolSelection) {
             logger.info(`Processing tool selection: ${toolSelection.tool}`);
@@ -275,8 +300,8 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
                 // Execute the tool automatically
                 const toolExecStartTime = Date.now();
                 const toolResult = await this.callMCPTool(toolSelection.tool, toolSelection.args);
-                logger.info(`⏱️ TIMING: Tool execution (${toolSelection.tool}) completed in ${Date.now() - toolExecStartTime}ms`);
-                logger.info(`Tool executed successfully, result length: ${toolResult.length}`);
+                logTiming(`Tool execution: ${toolSelection.tool}`, toolExecStartTime);
+                logger.info('Tool executed successfully', { resultLength: toolResult.length });
                 
                 // Create messages with tool result for final response
                 const messagesWithTool = [
@@ -293,11 +318,11 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
                 ];
                 
                 const finalResponseStartTime = Date.now();
-                logger.info('🌊 Starting streaming final response generation');
+                logger.info('Starting streaming final response generation');
                 await this.generateResponseWithToolResultsStreaming(messagesWithTool, temperature, max_tokens, res);
-                logger.info(`⏱️ TIMING: Final response generation completed in ${Date.now() - finalResponseStartTime}ms`);
+                logTiming('Final response generation', finalResponseStartTime);
                 
-                logger.info(`⏱️ TIMING: Total request processing time: ${Date.now() - startTime}ms`);
+                logTiming('Total chat completion request', startTime);
                 return;
                 
               } catch (toolError) {
@@ -326,15 +351,15 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
         const promptStartTime = Date.now();
         const basePrompt = this.convertMessagesToPrompt(messages);
         const prompt = await this.enhancePromptWithTools(basePrompt);
-        logger.info(`⏱️ TIMING: Prompt preparation completed in ${Date.now() - promptStartTime}ms`);
+        logTiming('Prompt preparation', promptStartTime);
         
         // Always send streaming response to Continue (ignoring stream parameter)
         const ollamaStartTime = Date.now();
-        logger.info('🌊 Starting streaming response for regular chat');
+        logger.info('Starting streaming response for regular chat');
         await this.sendToOllamaStreaming(prompt, temperature, max_tokens, res);
-        logger.info(`⏱️ TIMING: Ollama response completed in ${Date.now() - ollamaStartTime}ms`);
+        logTiming('Ollama response', ollamaStartTime);
         
-        logger.info(`⏱️ TIMING: Total request processing time: ${Date.now() - startTime}ms`);
+        logTiming('Total chat completion request', startTime);
         
         logger.info('Successfully processed chat completion');
         
@@ -553,7 +578,7 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
     const model = useFastModel ? this.config.ollama.fast_model : this.config.ollama.model;
     
     try {
-      logger.info('🌊 Starting true streaming response from Ollama');
+      logger.info('Starting Ollama streaming response');
       
       // Set SSE headers immediately
       res.writeHead(200, {
@@ -688,8 +713,7 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
   }
 
   private sendStreamingResponse(res: any, content: string, model?: string): void {
-    // Always send streaming response to Continue
-    logger.info('=== SENDING STREAMING RESPONSE TO CONTINUE ===');
+    logger.info('Sending streaming response to Continue');
     
     // Set SSE headers
     res.writeHead(200, {
@@ -704,15 +728,11 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
     const created = Math.floor(Date.now() / 1000);
     const responseModel = model || this.config.ollama.model;
     
-    logger.info(`Response headers:`, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+    logger.debug('Streaming response details', {
+      contentLength: content.length,
+      model: responseModel,
+      responseId: id
     });
-    logger.info(`Full response content: "${content}"`);
-    logger.info(`=== STREAMING CHUNKS START ===`);
     
     // Split response into chunks and send as streaming
     const words = content.split(' ');
@@ -733,7 +753,6 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
       };
       
       const chunkData = `data: ${JSON.stringify(streamChunk)}\n\n`;
-      logger.debug(`Chunk ${i}: ${chunkData.trim()}`);
       res.write(chunkData);
     }
     
@@ -758,9 +777,7 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
     const finalChunkData = `data: ${JSON.stringify(finalChunk)}\n\n`;
     const doneData = 'data: [DONE]\n\n';
     
-    logger.info(`Final chunk: ${finalChunkData.trim()}`);
-    logger.info(`Done message: ${doneData.trim()}`);
-    logger.info(`=== END STREAMING RESPONSE ===`);
+    logger.debug('Streaming response completed', { totalWords: words.length });
     
     res.write(finalChunkData);
     res.write(doneData);
@@ -1131,11 +1148,11 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
           if (line.trim()) {
             try {
               const response = JSON.parse(line);
-              logger.debug(`${mcpName} Response:`, response);
+              // Response logged by logMCPResponse helper
               
               // Look for our tool call response
               if (response.id === toolCallId) {
-                logger.info(`⏱️ TIMING: MCP tool call completed in ${Date.now() - callStartTime}ms`);
+                logTiming(`MCP tool call: ${toolName}`, callStartTime);
                 
                 if (response.result) {
                   // Extract the actual result data from MCP response structure
@@ -1149,13 +1166,15 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
                     resultData = JSON.stringify(response.result);
                   }
                   
-                  logger.debug('Extracted tool result:', resultData);
+                  logMCPResponse(mcpName, toolName, true, { resultLength: resultData.length });
                   cleanup();
                   resolve(resultData);
                 } else if (response.error) {
+                  logMCPResponse(mcpName, toolName, false, response.error);
                   cleanup();
                   reject(new Error(`MCP tool error: ${response.error.message}`));
                 } else {
+                  logMCPResponse(mcpName, toolName, true);
                   cleanup();
                   resolve('Tool executed successfully');
                 }
@@ -1192,10 +1211,7 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
         }
       });
 
-      logger.info('📤 SENDING MCP TOOL CALL REQUEST:');
-      logger.info(`📝 Request JSON: ${toolCallRequest}`);
-      logger.info(`🔧 Tool name: ${toolName}`);
-      logger.info(`📋 Args object: ${JSON.stringify(args, null, 2)}`);
+      logMCPRequest(mcpName, toolName, args);
       
       try {
         process.stdin?.write(toolCallRequest + '\n');
