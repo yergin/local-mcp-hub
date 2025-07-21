@@ -87,6 +87,8 @@ class LocalMCPHub {
   private config: Config;
   private mcpToolSchemas: Map<string, OpenAITool> = new Map();
   private schemasInitialized: boolean = false;
+  private mcpProcesses: Map<string, ChildProcess> = new Map();
+  private mcpProcessReady: Map<string, boolean> = new Map();
 
   constructor() {
     this.app = express();
@@ -167,8 +169,9 @@ class LocalMCPHub {
 
     // OpenAI-compatible chat completions
     this.app.post('/v1/chat/completions', async (req, res) => {
+      const startTime = Date.now();
       try {
-        logger.info('Received chat completion request');
+        logger.info(`⏱️ TIMING: Chat completion request received at ${startTime}`);
         logger.debug('Request body:', JSON.stringify(req.body, null, 2));
         
         const { messages, model, temperature = 0.7, max_tokens = 4000, stream = false, tools, tool_choice } = req.body;
@@ -209,11 +212,14 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
           }
           
           // Replace Continue's tools with our MCP tools
+          const toolsStartTime = Date.now();
           const mcpTools = this.getOpenAITools();
-          logger.info(`Using MCP tools instead: ${mcpTools.length} tools`);
+          logger.info(`⏱️ TIMING: Got MCP tools in ${Date.now() - toolsStartTime}ms (${mcpTools.length} tools)`);
           logger.debug('MCP tools:', mcpTools.map((t: OpenAITool) => t.function.name));
           
+          const selectionStartTime = Date.now();
           const toolSelection = await this.selectToolWithLLM(messages, mcpTools);
+          logger.info(`⏱️ TIMING: Tool selection completed in ${Date.now() - selectionStartTime}ms`);
           logger.info(`Tool selection result: ${JSON.stringify(toolSelection)}`);
           
           if (toolSelection) {
@@ -225,7 +231,9 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
               
               try {
                 // Execute the tool automatically
+                const toolExecStartTime = Date.now();
                 const toolResult = await this.callMCPTool(toolSelection.tool, toolSelection.args);
+                logger.info(`⏱️ TIMING: Tool execution (${toolSelection.tool}) completed in ${Date.now() - toolExecStartTime}ms`);
                 logger.info(`Tool executed successfully, result length: ${toolResult.length}`);
                 
                 // Create messages with tool result for final response
@@ -242,8 +250,11 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
                   }
                 ];
                 
+                const finalResponseStartTime = Date.now();
                 const finalResponse = await this.generateResponseWithToolResults(messagesWithTool, temperature, max_tokens);
+                logger.info(`⏱️ TIMING: Final response generation completed in ${Date.now() - finalResponseStartTime}ms`);
                 
+                logger.info(`⏱️ TIMING: Total request processing time: ${Date.now() - startTime}ms`);
                 logger.info('Sending final response with tool results');
                 this.sendStreamingResponse(res, finalResponse);
                 return;
@@ -271,11 +282,17 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
         }
         
         // No tools needed, generate normal response
+        const promptStartTime = Date.now();
         const basePrompt = this.convertMessagesToPrompt(messages);
         const prompt = await this.enhancePromptWithTools(basePrompt);
+        logger.info(`⏱️ TIMING: Prompt preparation completed in ${Date.now() - promptStartTime}ms`);
         
         // Always send streaming response to Continue (ignoring stream parameter)
+        const ollamaStartTime = Date.now();
         const response = await this.sendToOllama(prompt, temperature, max_tokens);
+        logger.info(`⏱️ TIMING: Ollama response completed in ${Date.now() - ollamaStartTime}ms`);
+        
+        logger.info(`⏱️ TIMING: Total request processing time: ${Date.now() - startTime}ms`);
         this.sendStreamingResponse(res, response);
         
         logger.info('Successfully processed chat completion');
@@ -632,6 +649,25 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
   public start(): void {
     const port = process.env.PORT ? parseInt(process.env.PORT) : this.config.hub.port;
     
+    // Set up graceful shutdown handlers
+    process.on('SIGTERM', () => {
+      logger.info('Received SIGTERM, shutting down gracefully...');
+      this.cleanup();
+      process.exit(0);
+    });
+
+    process.on('SIGINT', () => {
+      logger.info('Received SIGINT, shutting down gracefully...');
+      this.cleanup();
+      process.exit(0);
+    });
+
+    process.on('uncaughtException', (error) => {
+      logger.error('Uncaught exception:', error);
+      this.cleanup();
+      process.exit(1);
+    });
+    
     this.app.listen(port, async () => {
       logger.info(`Local MCP Hub started on port ${port}`);
       logger.info(`OpenAI-compatible API available at http://localhost:${port}/v1`);
@@ -641,7 +677,7 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
       // Test Ollama connection on startup
       this.testOllamaConnection();
       
-      // Initialize MCP tool schemas
+      // Initialize MCP tool schemas and keep processes alive
       await this.initializeMCPSchemas();
     });
   }
@@ -711,6 +747,10 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
         cwd: path.join(__dirname, '..')
       });
 
+      // Store process in pool immediately
+      this.mcpProcesses.set(mcpName, mcpProcess);
+      this.mcpProcessReady.set(mcpName, false);
+
       let responseBuffer = '';
       let initialized = false;
       const schemas: OpenAITool[] = [];
@@ -751,7 +791,7 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
                   logger.debug(`${mcpName} sent tools/list request`);
                 }
               } else if (response.id === 2 && response.result) {
-                // Tools list response
+                // Tools list response - mark process as ready and resolve with schemas
                 const tools = response.result.tools || [];
                 for (const tool of tools) {
                   schemas.push({
@@ -767,8 +807,11 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
                     }
                   });
                 }
+                
+                // Mark process as ready for tool calls
+                this.mcpProcessReady.set(mcpName, true);
+                logger.info(`${mcpName} process initialized and ready for tool calls`);
                 resolve(schemas);
-                mcpProcess.kill();
                 return;
               }
             } catch (e) {
@@ -796,17 +839,22 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
             params: {}
           });
           mcpProcess.stdin?.write(toolsRequest + '\n');
-          mcpProcess.stdin?.end();
         }
       });
 
       mcpProcess.on('close', (code) => {
+        logger.warn(`${mcpName} process closed with code ${code}`);
+        this.mcpProcesses.delete(mcpName);
+        this.mcpProcessReady.delete(mcpName);
         if (schemas.length === 0) {
           reject(new Error(`Failed to get schemas from ${mcpName}`));
         }
       });
 
       mcpProcess.on('error', (error) => {
+        logger.error(`${mcpName} process error:`, error);
+        this.mcpProcesses.delete(mcpName);
+        this.mcpProcessReady.delete(mcpName);
         reject(error);
       });
 
@@ -824,48 +872,40 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
 
       mcpProcess.stdin?.write(initRequest + '\n');
 
-      // Protocol-based approach: tools/list is sent in response handler after initialization
-
       // Timeout
       setTimeout(() => {
-        mcpProcess.kill();
-        reject(new Error(`Timeout getting schemas from ${mcpName}`));
+        if (!this.mcpProcessReady.get(mcpName)) {
+          logger.error(`${mcpName} initialization timeout`);
+          mcpProcess.kill();
+          this.mcpProcesses.delete(mcpName);
+          this.mcpProcessReady.delete(mcpName);
+          reject(new Error(`Timeout getting schemas from ${mcpName}`));
+        }
       }, 30000);
     });
   }
 
   private async callMCPTool(toolName: string, args: any = {}): Promise<string> {
     // Determine which MCP server to use based on tool name
-    let mcpCommand: string;
-    let mcpArgs: string[];
-
+    let mcpName: string;
     if (toolName.includes('resolve-library-id') || toolName.includes('get-library-docs')) {
-      // Context7 tool
-      mcpCommand = 'node';
-      mcpArgs = [path.join(__dirname, '..', 'mcps', 'context7', 'dist', 'index.js')];
+      mcpName = 'context7';
     } else {
-      // Serena tool
-      mcpCommand = path.join(__dirname, '..', 'mcps', 'serena', '.venv', 'bin', 'python');
-      mcpArgs = [
-        path.join(__dirname, '..', 'mcps', 'serena', 'scripts', 'mcp_server.py'),
-        '--context', 'ide-assistant',
-        '--project', path.join(__dirname, '..'),
-        '--transport', 'stdio',
-        '--tool-timeout', '30',
-        '--log-level', 'WARNING'
-      ];
+      mcpName = 'serena';
+    }
+
+    // Check if we have a ready process for this MCP server
+    const process = this.mcpProcesses.get(mcpName);
+    const isReady = this.mcpProcessReady.get(mcpName);
+
+    if (!process || !isReady) {
+      throw new Error(`MCP server ${mcpName} is not available or not ready`);
     }
 
     return new Promise((resolve, reject) => {
-      const process = spawn(mcpCommand, mcpArgs, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: path.join(__dirname, '..')
-      });
-
-      let output = '';
-      let errorOutput = '';
-      let initialized = false;
+      const callStartTime = Date.now();
       let responseBuffer = '';
+      let toolCallId = Date.now(); // Use timestamp as unique ID
 
       const handleResponse = (data: string) => {
         responseBuffer += data;
@@ -878,54 +918,12 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
           if (line.trim()) {
             try {
               const response = JSON.parse(line);
-              logger.debug('MCP Response:', response);
+              logger.debug(`${mcpName} Response:`, response);
               
-              if (response.id === 1 && !initialized) {
-                // Step 1: Initialization response
-                initialized = true;
-                logger.info('MCP server initialized successfully');
+              // Look for our tool call response
+              if (response.id === toolCallId) {
+                logger.info(`⏱️ TIMING: MCP tool call completed in ${Date.now() - callStartTime}ms`);
                 
-                // Send initialized notification
-                const initializedNotification = JSON.stringify({
-                  jsonrpc: '2.0',
-                  method: 'notifications/initialized',
-                  params: {}
-                });
-                process.stdin?.write(initializedNotification + '\n');
-                
-                // Step 2: Send tools/list request
-                const toolsRequest = JSON.stringify({
-                  jsonrpc: '2.0',
-                  id: 2,
-                  method: 'tools/list',
-                  params: {}
-                });
-                logger.info('📋 Sending tools/list request');
-                process.stdin?.write(toolsRequest + '\n');
-                
-              } else if (response.id === 2) {
-                // Step 2: Tools/list response - now send the actual tool call
-                logger.info('📋 Tools list received, sending tool call');
-                
-                const toolCallRequest = JSON.stringify({
-                  jsonrpc: '2.0',
-                  id: 3,
-                  method: 'tools/call',
-                  params: {
-                    name: toolName,
-                    arguments: args
-                  }
-                });
-
-                logger.info('📤 SENDING MCP TOOL CALL REQUEST:');
-                logger.info(`📝 Request JSON: ${toolCallRequest}`);
-                logger.info(`🔧 Tool name: ${toolName}`);
-                logger.info(`📋 Args object: ${JSON.stringify(args, null, 2)}`);
-                process.stdin?.write(toolCallRequest + '\n');
-                process.stdin?.end();
-                
-              } else if (response.id === 3) {
-                // Step 3: Tool call response
                 if (response.result) {
                   // Extract the actual result data from MCP response structure
                   let resultData = 'Tool executed successfully';
@@ -939,10 +937,13 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
                   }
                   
                   logger.debug('Extracted tool result:', resultData);
+                  cleanup();
                   resolve(resultData);
                 } else if (response.error) {
+                  cleanup();
                   reject(new Error(`MCP tool error: ${response.error.message}`));
                 } else {
+                  cleanup();
                   resolve('Tool executed successfully');
                 }
                 return;
@@ -954,53 +955,55 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
         }
       };
 
-      process.stdout?.on('data', (data) => {
-        handleResponse(data.toString());
-      });
+      let cleanup = () => {
+        process.stdout?.off('data', handleResponse);
+        process.stderr?.off('data', errorHandler);
+      };
 
-      process.stderr?.on('data', (data) => {
-        errorOutput += data.toString();
-        logger.debug('MCP stderr:', data.toString());
-      });
+      const errorHandler = (data: Buffer) => {
+        logger.debug(`${mcpName} stderr:`, data.toString());
+      };
 
-      process.on('close', (code) => {
-        if (code !== 0 && !initialized) {
-          reject(new Error(`MCP server failed to start: ${errorOutput}`));
-        }
-      });
+      // Set up event listeners
+      process.stdout?.on('data', handleResponse);
+      process.stderr?.on('data', errorHandler);
 
-      process.on('error', (error) => {
-        reject(error);
-      });
-
-      // Send initialization request first
-      const initRequest = JSON.stringify({
+      // Send tool call request directly (no initialization needed - process is already ready)
+      const toolCallRequest = JSON.stringify({
         jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
+        id: toolCallId,
+        method: 'tools/call',
         params: {
-          protocolVersion: '2025-06-18',
-          capabilities: {
-            tools: {}
-          },
-          clientInfo: {
-            name: 'local-mcp-hub',
-            version: '1.0.0'
-          }
+          name: toolName,
+          arguments: args
         }
       });
 
-      logger.debug('Sending MCP init request:', initRequest);
-      process.stdin?.write(initRequest + '\n');
+      logger.info('📤 SENDING MCP TOOL CALL REQUEST:');
+      logger.info(`📝 Request JSON: ${toolCallRequest}`);
+      logger.info(`🔧 Tool name: ${toolName}`);
+      logger.info(`📋 Args object: ${JSON.stringify(args, null, 2)}`);
+      
+      try {
+        process.stdin?.write(toolCallRequest + '\n');
+      } catch (error) {
+        cleanup();
+        reject(new Error(`Failed to send tool call to ${mcpName}: ${error}`));
+        return;
+      }
 
-      // Follow proper MCP protocol: initialize → tools/list → tools/call
-      // No timeouts, just respond to actual protocol messages
-
-      // Overall timeout after 30 seconds
-      setTimeout(() => {
-        process.kill();
-        reject(new Error('MCP tool timeout'));
+      // Timeout for this specific tool call
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Tool call timeout for ${toolName}`));
       }, 30000);
+
+      // Wrap cleanup and timeout clearing
+      const originalCleanup = cleanup;
+      cleanup = () => {
+        clearTimeout(timeout);
+        originalCleanup();
+      };
     });
   }
 
@@ -1062,6 +1065,20 @@ ${hubContent.substring(0, 1000)}...
     return methods.slice(0, 10); // Limit to first 10 methods
   }
 
+  private cleanup(): void {
+    logger.info('Cleaning up MCP processes...');
+    for (const [mcpName, process] of this.mcpProcesses) {
+      try {
+        logger.info(`Terminating ${mcpName} process`);
+        process.kill('SIGTERM');
+      } catch (error) {
+        logger.warn(`Failed to terminate ${mcpName} process:`, error);
+      }
+    }
+    this.mcpProcesses.clear();
+    this.mcpProcessReady.clear();
+  }
+
   private async selectToolWithLLM(messages: any[], tools: OpenAITool[]): Promise<{tool: string, args: any} | null> {
     const lastMessage = messages[messages.length - 1];
     const userRequest = lastMessage.content;
@@ -1096,7 +1113,9 @@ Response:`;
     
     try {
       // Stage 1: Select the tool
+      const stage1StartTime = Date.now();
       const toolResponse = await this.sendToOllama(toolSelectionPrompt, 0.1, 100);
+      logger.info(`⏱️ TIMING: Stage 1 tool selection Ollama call completed in ${Date.now() - stage1StartTime}ms`);
       const cleanToolResponse = toolResponse.trim().replace(/```json|```/g, '').trim();
       
       logger.debug(`DEBUG: Stage 1 response: "${cleanToolResponse}"`);
@@ -1143,7 +1162,9 @@ Response:`;
       
       logger.debug(`DEBUG: Stage 2 prompt length: ${argsPrompt.length} chars`);
       
+      const stage2StartTime = Date.now();
       const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 150);
+      logger.info(`⏱️ TIMING: Stage 2 argument generation Ollama call completed in ${Date.now() - stage2StartTime}ms`);
       const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
       
       logger.debug(`DEBUG: Stage 2 response: "${cleanArgsResponse}"`);
