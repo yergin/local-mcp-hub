@@ -876,9 +876,9 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
   private getToolUsageGuidance(toolName: string): string | null {
     const usageMap: Record<string, string> = {
       'list_dir': 'USE WHEN: user asks "what files are in", "list files", "show directory contents", "what\'s in this folder"',
-      'find_file': 'USE WHEN: user wants to find specific files by name or pattern like "find *.js files" or "where is config.json"',
+      'find_file': 'USE WHEN: user wants to find specific files by NAME or file extension like "find *.js files" or "where is config.json"',
       'read_file_content': 'USE WHEN: user wants to see the contents of a specific file',
-      'search_for_pattern': 'USE WHEN: user wants to search for code patterns or text within files',
+      'search_for_pattern': 'USE WHEN: user wants to search for TEXT/CONTENT/COMMENTS inside files like "search for TODO", "find all console.log", "search for function definitions"',
       'get_symbols_overview': 'USE WHEN: user wants to understand the structure/symbols in code files',
       'find_symbol': 'USE WHEN: user is looking for specific functions, classes, or variables in code',
       'replace_symbol_body': 'USE WHEN: user wants to modify/replace specific functions or code blocks',
@@ -1189,6 +1189,10 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
                   }
                   
                   logMCPResponse(mcpName, toolName, true, { resultLength: resultData.length });
+                  logger.debug(`TOOL RESULT DEBUG: ${toolName}`, { 
+                    fullResult: resultData,
+                    resultPreview: resultData.substring(0, 200) + (resultData.length > 200 ? '...' : '')
+                  });
                   cleanup();
                   resolve(resultData);
                 } else if (response.error) {
@@ -1529,7 +1533,19 @@ ${hubContent.substring(0, 1000)}...
     
     logger.debug(`DEBUG: Full model Stage 2 response: "${cleanArgsResponse}"`);
     
-    return JSON.parse(cleanArgsResponse);
+    const parsedArgs = JSON.parse(cleanArgsResponse);
+    
+    // Filter out null values from full model response
+    if (parsedArgs.args && typeof parsedArgs.args === 'object') {
+      Object.keys(parsedArgs.args).forEach(key => {
+        if (parsedArgs.args[key] === null) {
+          delete parsedArgs.args[key];
+          logger.debug(`Filtered out null parameter: ${key}`);
+        }
+      });
+    }
+
+    return parsedArgs;
   }
 
   private async generateResponseWithToolResults(
@@ -1575,6 +1591,12 @@ ${hubContent.substring(0, 1000)}...
       });
       prompt += '\nBased on the tool results above, provide a helpful and accurate response to the user. Summarize the information clearly and answer their question.';
     }
+    
+    logger.debug('FINAL RESPONSE PROMPT DEBUG', {
+      promptLength: prompt.length,
+      toolResultsCount: toolResults.length,
+      fullPrompt: prompt
+    });
     
     await this.sendToOllamaStreaming(prompt, temperature, maxTokens, res);
   }
