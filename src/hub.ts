@@ -32,6 +32,7 @@ interface PromptsConfig {
   toolGuidance?: {
     usageHints?: Record<string, string>;
     fastModelTools?: string[];
+    safeTools?: string[];
   };
   responseGeneration?: {
     toolResultsStreaming?: { template?: string };
@@ -1409,50 +1410,11 @@ ${hubContent.substring(0, 1000)}...
 
 
   private isSafeTool(toolName: string): boolean {
-    // Define safe read-only tools that can be auto-executed (only actual MCP tools)
-    const safeTools = [
-      'list_dir',               // List directory contents  
-      'find_file',              // Find files matching pattern
-      'search_for_pattern',     // Search for code patterns
-      'get_symbols_overview',   // Get symbol overview
-      'find_symbol',            // Find specific symbols
-      'find_referencing_symbols', // Find symbol references
-      'read_memory',            // Read memory files
-      'list_memories',          // List memory files
-      'get_current_config',     // Get current configuration
-      'check_onboarding_performed', // Check onboarding status
-      'resolve-library-id',     // Resolve library name to Context7 ID
-      'get-library-docs'        // Fetch library documentation
-    ];
-    
-    return safeTools.includes(toolName);
+    return this.prompts.toolGuidance?.safeTools?.includes(toolName) || false;
   }
 
   private isSimpleArgumentGeneration(toolName: string): boolean {
     return this.prompts.toolGuidance?.fastModelTools?.includes(toolName) || false;
-  }
-
-  private requiresComplexReasoning(toolName: string): boolean {
-    // Explicit list of tools requiring sophisticated reasoning (only actual MCP tools)
-    const COMPLEX_REASONING_TOOLS = [
-      'search_for_pattern',       // Regex generation + file filtering logic
-      'replace_regex',            // Regex replacement patterns  
-      'find_symbol',              // Symbol path matching rules + depth decisions
-      'find_referencing_symbols', // Symbol relationship analysis
-      'replace_symbol_body',      // Code structure understanding + replacement logic
-      'insert_after_symbol',      // Code insertion positioning logic
-      'insert_before_symbol',     // Code insertion positioning logic
-      'switch_modes',             // Complex mode switching logic
-      'onboarding',               // Multi-step process logic
-      'think_about_collected_information', // Complex reasoning tasks
-      'think_about_task_adherence',        // Complex reasoning tasks  
-      'think_about_whether_you_are_done',  // Complex reasoning tasks
-      'summarize_changes',        // Complex analysis and summarization
-      'prepare_for_new_conversation', // Complex state management
-      'initial_instructions'      // Complex initialization logic
-    ];
-    
-    return COMPLEX_REASONING_TOOLS.includes(toolName);
   }
 
   private async generateArgsWithFastModel(userRequest: string, toolSchema: OpenAITool): Promise<any> {

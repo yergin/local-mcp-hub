@@ -6,7 +6,7 @@
   },
   "hub": {
     "port": 3002,
-    "log_level": "debug",
+    "log_level": "info",
     "cors_origins": ["*"]
   },
   "mcps": {
