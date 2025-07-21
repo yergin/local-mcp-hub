@@ -1497,7 +1497,15 @@ ${hubContent.substring(0, 1000)}...
     
     logger.debug(`DEBUG: Fast model Stage 2 response: "${cleanArgsResponse}"`);
 
-    return JSON.parse(cleanArgsResponse);
+    const parsedArgs = JSON.parse(cleanArgsResponse);
+    
+    // Strip problematic parameters that the fast model incorrectly adds
+    if (parsedArgs.args && parsedArgs.args.max_answer_chars !== undefined) {
+      delete parsedArgs.args.max_answer_chars;
+      logger.debug('Stripped max_answer_chars from fast model response');
+    }
+
+    return parsedArgs;
   }
 
   private async generateArgsWithFullModel(userRequest: string, toolSchema: OpenAITool): Promise<any> {

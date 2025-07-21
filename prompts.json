@@ -23,7 +23,7 @@
   },
   "argumentGeneration": {
     "fastModel": {
-      "template": "Generate tool arguments from user request.\n\nTool: {toolName}\nUser request: \"{userRequest}\"\n\nParameters:\n{params}\n\nCommon patterns:\n- For directory operations: use \".\" for current directory\n- For file operations: extract filename/pattern from request\n- For boolean flags: true if mentioned (recursive, etc.)\n- OMIT optional parameters that have good defaults unless user specifically requests different values\n- Do NOT include max_answer_chars unless user asks for limited output\n\nRespond ONLY with JSON: {\"args\": {\"param\": \"value\"}}\n\nResponse:",
+      "template": "Generate tool arguments from user request.\n\nTool: {toolName}\nUser request: \"{userRequest}\"\n\nParameters:\n{params}\n\nCommon patterns:\n- For directory operations: use \".\" for current directory\n- For file operations: extract filename/pattern from request\n- For boolean flags: true if mentioned (recursive, etc.)\n- OMIT optional parameters that have good defaults unless user specifically requests different values\n\nRespond ONLY with JSON: {\"args\": {\"param\": \"value\"}}\n\nResponse:",
       "temperature": 0.1,
       "useFastModel": true
     },
