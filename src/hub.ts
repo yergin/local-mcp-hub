@@ -29,6 +29,10 @@ interface PromptsConfig {
   codeCompletion: {
     completion: PromptConfig;
   };
+  toolGuidance?: {
+    usageHints?: Record<string, string>;
+    fastModelTools?: string[];
+  };
 }
 
 // Completion interfaces
@@ -874,18 +878,7 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
   }
 
   private getToolUsageGuidance(toolName: string): string | null {
-    const usageMap: Record<string, string> = {
-      'list_dir': 'USE WHEN: user asks "what files are in", "list files", "show directory contents", "what\'s in this folder"',
-      'find_file': 'USE WHEN: user wants to find specific files by NAME or file extension like "find *.js files" or "where is config.json"',
-      'read_file_content': 'USE WHEN: user wants to see the contents of a specific file',
-      'search_for_pattern': 'USE WHEN: user wants to search for TEXT/CONTENT/COMMENTS inside files like "search for TODO", "find all console.log", "search for function definitions"',
-      'get_symbols_overview': 'USE WHEN: user wants to understand the structure/symbols in code files',
-      'find_symbol': 'USE WHEN: user is looking for specific functions, classes, or variables in code',
-      'replace_symbol_body': 'USE WHEN: user wants to modify/replace specific functions or code blocks',
-      'get-library-docs': 'USE WHEN: user asks about documentation for a specific library or framework'
-    };
-    
-    return usageMap[toolName] || null;
+    return this.prompts.toolGuidance?.usageHints?.[toolName] || null;
   }
 
   public start(): void {
@@ -1437,25 +1430,7 @@ ${hubContent.substring(0, 1000)}...
   }
 
   private isSimpleArgumentGeneration(toolName: string): boolean {
-    // Explicit whitelist of tools with predictable, simple arguments
-    const SIMPLE_TOOLS = [
-      'list_dir',               // Always: relative_path + recursive boolean
-      'find_file',              // Always: file_mask + relative_path  
-      'read_file_content',      // Always: just relative_path
-      'write_memory',           // Simple: key + content
-      'read_memory',            // Simple: just key
-      'list_memories',          // Simple: no arguments or basic filtering
-      'delete_memory',          // Simple: just key
-      'get_current_config',     // Simple: no arguments
-      'restart_language_server', // Simple: no/minimal arguments
-      'get_symbols_overview',   // Simple: relative_path parameter only
-      'activate_project',       // Simple: project path
-      'remove_project',         // Simple: project path
-      'resolve-library-id',     // Simple: library name string
-      'get-library-docs'        // Simple: library ID string (after resolve)
-    ];
-    
-    return SIMPLE_TOOLS.includes(toolName);
+    return this.prompts.toolGuidance?.fastModelTools?.includes(toolName) || false;
   }
 
   private requiresComplexReasoning(toolName: string): boolean {
