@@ -1,0 +1,46 @@
+{
+  "connectionTest": {
+    "main": {
+      "message": "Hello, this is a connection test.",
+      "temperature": 0.7,
+      "maxTokens": 100,
+      "useFastModel": false
+    },
+    "fast": {
+      "message": "Test",
+      "temperature": 0.7,
+      "maxTokens": 50,
+      "useFastModel": true
+    }
+  },
+  "toolSelection": {
+    "stage1": {
+      "template": "You are a helpful assistant that can use tools to help users.\n\nUser request: \"{userRequest}\"\n\nAvailable tools:\n{toolNames}\n\nINSTRUCTIONS:\n1. Check if the user's request matches any tool's \"USE WHEN\" criteria\n2. If a tool matches, respond with: {\"tool\": \"tool_name\"}\n3. If no tool matches, respond with: {\"tool\": null}\n\nRESPOND WITH ONLY THE JSON, NO OTHER TEXT.\n\nResponse:",
+      "temperature": 0.1,
+      "maxTokens": 100,
+      "useFastModel": true
+    }
+  },
+  "argumentGeneration": {
+    "fastModel": {
+      "template": "Generate tool arguments from user request.\n\nTool: {toolName}\nUser request: \"{userRequest}\"\n\nParameters:\n{params}\n\nCommon patterns:\n- For directory operations: use \".\" for current directory\n- For file operations: extract filename/pattern from request\n- For boolean flags: true if mentioned (recursive, etc.)\n- OMIT optional parameters that have good defaults unless user specifically requests different values\n- Do NOT include max_answer_chars unless user asks for limited output\n\nRespond ONLY with JSON: {\"args\": {\"param\": \"value\"}}\n\nResponse:",
+      "temperature": 0.1,
+      "maxTokens": 100,
+      "useFastModel": true
+    },
+    "fullModel": {
+      "template": "You are a helpful assistant that generates tool arguments.\n\nUser request: \"{userRequest}\"\nSelected tool: {toolName}\n\nTool description: {toolDescription}\n\nParameters:\n{params}\n\nINSTRUCTIONS:\n1. Extract arguments from the user's request based on the tool's parameter requirements\n2. Use relative paths (e.g., \".\" for current directory) and appropriate boolean values\n3. For complex tools, carefully consider parameter relationships and validation\n4. Respond with: {\"args\": {\"param1\": \"value1\", \"param2\": \"value2\"}}\n\nRESPOND WITH ONLY THE JSON, NO OTHER TEXT.\n\nResponse:",
+      "temperature": 0.1,
+      "maxTokens": 150,
+      "useFastModel": false
+    }
+  },
+  "codeCompletion": {
+    "completion": {
+      "template": "You are an efficient code completion assistant. Your goal is to save the developer time by writing as much useful, correct code as possible.\n\nFile: {filePath}\nCode before cursor: {codeBeforeCursor}\nCode after cursor: {codeSuffix}\n\nYour response must start with the exact text \"{codeBeforeCursor}\" character-for-character, then continue with your completion, and include the suffix \"{codeSuffix}\". Provide a meaningful completion that implements or extends the code logically. Write clean, well-typed code.\n\nIMPORTANT: Respond with plain text only. Do not use code blocks, markdown formatting, or backticks. Do not add explanations or comments after the code. Only provide the completed code.",
+      "temperature": 0.3,
+      "maxTokens": 500,
+      "useFastModel": false
+    }
+  }
+}

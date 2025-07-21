@@ -5,6 +5,32 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 
+// Prompts configuration interfaces
+interface PromptConfig {
+  message?: string;
+  template?: string;
+  temperature: number;
+  maxTokens: number;
+  useFastModel: boolean;
+}
+
+interface PromptsConfig {
+  connectionTest: {
+    main: PromptConfig;
+    fast: PromptConfig;
+  };
+  toolSelection: {
+    stage1: PromptConfig;
+  };
+  argumentGeneration: {
+    fastModel: PromptConfig;
+    fullModel: PromptConfig;
+  };
+  codeCompletion: {
+    completion: PromptConfig;
+  };
+}
+
 // Completion interfaces
 interface FIMRequest {
   prefix: string;
@@ -86,6 +112,7 @@ const logger = winston.createLogger({
 class LocalMCPHub {
   private app: express.Application;
   private config: Config;
+  private prompts: PromptsConfig;
   private mcpToolSchemas: Map<string, OpenAITool> = new Map();
   private schemasInitialized: boolean = false;
   private mcpProcesses: Map<string, ChildProcess> = new Map();
@@ -94,6 +121,7 @@ class LocalMCPHub {
   constructor() {
     this.app = express();
     this.config = this.loadConfig();
+    this.prompts = this.loadPrompts();
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -107,6 +135,19 @@ class LocalMCPHub {
       return config;
     } catch (error) {
       logger.error('Failed to load configuration:', error);
+      process.exit(1);
+    }
+  }
+
+  private loadPrompts(): PromptsConfig {
+    try {
+      const promptsPath = path.join(__dirname, '..', 'prompts.json');
+      const promptsData = fs.readFileSync(promptsPath, 'utf-8');
+      const prompts = JSON.parse(promptsData) as PromptsConfig;
+      logger.info('Loaded prompts configuration');
+      return prompts;
+    } catch (error) {
+      logger.error('Failed to load prompts configuration:', error);
       process.exit(1);
     }
   }
@@ -343,19 +384,16 @@ You can check initialization status at: http://localhost:${this.config.hub.port}
           .map(line => line.trim());
         const languageContext = filePathLines.length > 0 ? filePathLines[filePathLines.length - 1] : '';
 
-        // Create context-aware completion prompt
-        const completionPrompt = `You are an efficient code completion assistant. Your goal is to save the developer time by writing as much useful, correct code as possible.
+        // Create context-aware completion prompt using template
+        const completionTemplate = this.prompts.codeCompletion.completion.template!;
+        const completionPrompt = completionTemplate
+          .replace('{filePath}', languageContext.replace('// Path: ', ''))
+          .replace(/\{codeBeforeCursor\}/g, codeBeforeCursor)
+          .replace(/\{codeSuffix\}/g, fimRequest.suffix);
 
-File: ${languageContext.replace('// Path: ', '')}
-Code before cursor: ${codeBeforeCursor}
-Code after cursor: ${fimRequest.suffix}
-
-Your response must start with the exact text "${codeBeforeCursor}" character-for-character, then continue with your completion, and include the suffix "${fimRequest.suffix}". Provide a meaningful completion that implements or extends the code logically. Write clean, well-typed code.
-
-IMPORTANT: Respond with plain text only. Do not use code blocks, markdown formatting, or backticks. Do not add explanations or comments after the code. Only provide the completed code.`;
-
-        // Get completion from Ollama using full context
-        const rawSuggestion = await this.sendToOllama(completionPrompt, temperature, max_tokens);
+        // Get completion from Ollama using configured settings
+        const completionConfig = this.prompts.codeCompletion.completion;
+        const rawSuggestion = await this.sendToOllama(completionPrompt, completionConfig.temperature, completionConfig.maxTokens, completionConfig.useFastModel);
         
         logger.info(`Raw Ollama response: ${rawSuggestion.substring(0, 200)}${rawSuggestion.length > 200 ? '...' : ''}`);
         
@@ -440,6 +478,26 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
           supports_tools: true
         }]
       });
+    });
+
+    // Prompts reload endpoint
+    this.app.post('/v1/admin/reload-prompts', (req, res) => {
+      try {
+        this.prompts = this.loadPrompts();
+        logger.info('Prompts configuration reloaded successfully');
+        res.json({ 
+          success: true, 
+          message: 'Prompts configuration reloaded successfully',
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        logger.error('Failed to reload prompts configuration:', error);
+        res.status(500).json({ 
+          success: false, 
+          error: 'Failed to reload prompts configuration',
+          message: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
     });
   }
 
@@ -832,12 +890,14 @@ IMPORTANT: Respond with plain text only. Do not use code blocks, markdown format
       logger.info('Testing connection to remote Ollama...');
       
       // Test main model
-      const response = await this.sendToOllama('Hello, this is a connection test.', 0.7, 100, false);
+      const mainTestConfig = this.prompts.connectionTest.main;
+      const response = await this.sendToOllama(mainTestConfig.message!, mainTestConfig.temperature, mainTestConfig.maxTokens, mainTestConfig.useFastModel);
       logger.info(`✓ Main model (${this.config.ollama.model}) connection successful`);
       logger.info(`✓ Response: ${response.substring(0, 100)}...`);
       
       // Test fast model
-      const fastResponse = await this.sendToOllama('Test', 0.7, 50, true);
+      const fastTestConfig = this.prompts.connectionTest.fast;
+      const fastResponse = await this.sendToOllama(fastTestConfig.message!, fastTestConfig.temperature, fastTestConfig.maxTokens, fastTestConfig.useFastModel);
       logger.info(`✓ Fast model (${this.config.ollama.fast_model}) connection successful`);
       logger.info(`✓ Fast response: ${fastResponse.substring(0, 50)}...`);
       
@@ -1246,28 +1306,18 @@ ${hubContent.substring(0, 1000)}...
       return `- ${tool.function.name}: ${shortDesc}${guidance ? '. ' + guidance : ''}`;
     }).join('\n');
     
-    const toolSelectionPrompt = `You are a helpful assistant that can use tools to help users.
-
-User request: "${userRequest}"
-
-Available tools:
-${toolNames}
-
-INSTRUCTIONS:
-1. Check if the user's request matches any tool's "USE WHEN" criteria
-2. If a tool matches, respond with: {"tool": "tool_name"}
-3. If no tool matches, respond with: {"tool": null}
-
-RESPOND WITH ONLY THE JSON, NO OTHER TEXT.
-
-Response:`;
+    const toolSelectionTemplate = this.prompts.toolSelection.stage1.template!;
+    const toolSelectionPrompt = toolSelectionTemplate
+      .replace('{userRequest}', userRequest)
+      .replace('{toolNames}', toolNames);
     
     logger.debug(`DEBUG: Stage 1 prompt length: ${toolSelectionPrompt.length} chars`);
     
     try {
       // Stage 1: Select the tool using fast model
       const stage1StartTime = Date.now();
-      const toolResponse = await this.sendToOllama(toolSelectionPrompt, 0.1, 100, true);
+      const stage1Config = this.prompts.toolSelection.stage1;
+      const toolResponse = await this.sendToOllama(toolSelectionPrompt, stage1Config.temperature, stage1Config.maxTokens, stage1Config.useFastModel);
       logger.info(`⏱️ TIMING: Stage 1 tool selection (fast model) completed in ${Date.now() - stage1StartTime}ms`);
       const cleanToolResponse = toolResponse.trim().replace(/```json|```/g, '').trim();
       
@@ -1394,29 +1444,17 @@ Response:`;
       .map(([name, schema]: [string, any]) => `- ${name} (${schema.type}): ${schema.description || 'No description'}`)
       .join('\n');
     
-    // Simplified prompt for fast model - focus on pattern recognition
-    const argsPrompt = `Generate tool arguments from user request.
-
-Tool: ${toolSchema.function.name}
-User request: "${userRequest}"
-
-Parameters:
-${params}
-
-Common patterns:
-- For directory operations: use "." for current directory
-- For file operations: extract filename/pattern from request
-- For boolean flags: true if mentioned (recursive, etc.)
-- OMIT optional parameters that have good defaults unless user specifically requests different values
-- Do NOT include max_answer_chars unless user asks for limited output
-
-Respond ONLY with JSON: {"args": {"param": "value"}}
-
-Response:`;
+    // Use configured prompt template for fast model
+    const fastArgsTemplate = this.prompts.argumentGeneration.fastModel.template!;
+    const argsPrompt = fastArgsTemplate
+      .replace('{toolName}', toolSchema.function.name)
+      .replace('{userRequest}', userRequest)
+      .replace('{params}', params);
     
     logger.debug(`DEBUG: Fast model Stage 2 prompt length: ${argsPrompt.length} chars`);
 
-    const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 100, true); // Use fast model
+    const fastArgsConfig = this.prompts.argumentGeneration.fastModel;
+    const argsResponse = await this.sendToOllama(argsPrompt, fastArgsConfig.temperature, fastArgsConfig.maxTokens, fastArgsConfig.useFastModel);
     const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
     
     logger.debug(`DEBUG: Fast model Stage 2 response: "${cleanArgsResponse}"`);
@@ -1429,30 +1467,18 @@ Response:`;
       .map(([name, schema]: [string, any]) => `- ${name} (${schema.type}): ${schema.description || 'No description'}`)
       .join('\n');
       
-    // Detailed prompt for full model - comprehensive reasoning
-    const argsPrompt = `You are a helpful assistant that generates tool arguments.
-
-User request: "${userRequest}"
-Selected tool: ${toolSchema.function.name}
-
-Tool description: ${toolSchema.function.description}
-
-Parameters:
-${params}
-
-INSTRUCTIONS:
-1. Extract arguments from the user's request based on the tool's parameter requirements
-2. Use relative paths (e.g., "." for current directory) and appropriate boolean values
-3. For complex tools, carefully consider parameter relationships and validation
-4. Respond with: {"args": {"param1": "value1", "param2": "value2"}}
-
-RESPOND WITH ONLY THE JSON, NO OTHER TEXT.
-
-Response:`;
+    // Use configured prompt template for full model
+    const fullArgsTemplate = this.prompts.argumentGeneration.fullModel.template!;
+    const argsPrompt = fullArgsTemplate
+      .replace('{userRequest}', userRequest)
+      .replace('{toolName}', toolSchema.function.name)
+      .replace('{toolDescription}', toolSchema.function.description)
+      .replace('{params}', params);
     
     logger.debug(`DEBUG: Full model Stage 2 prompt length: ${argsPrompt.length} chars`);
     
-    const argsResponse = await this.sendToOllama(argsPrompt, 0.1, 150, false); // Use full model
+    const fullArgsConfig = this.prompts.argumentGeneration.fullModel;
+    const argsResponse = await this.sendToOllama(argsPrompt, fullArgsConfig.temperature, fullArgsConfig.maxTokens, fullArgsConfig.useFastModel);
     const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
     
     logger.debug(`DEBUG: Full model Stage 2 response: "${cleanArgsResponse}"`);
