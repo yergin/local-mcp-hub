@@ -177,8 +177,12 @@ Key log categories:
 
 ```
 local-mcp-hub/
-├── src/
-│   └── hub.ts              # Main application server
+├── src/                    # Source code (modular architecture)
+│   ├── hub.ts              # Main application server (coordination)
+│   ├── ollama-client.ts    # Ollama server communication
+│   ├── mcp-manager.ts      # MCP process lifecycle & tool calls
+│   ├── tool-selector.ts    # Intelligent tool selection & argument generation
+│   └── request-processor.ts # Request parsing & response formatting
 ├── mcps/                   # MCP server implementations (downloaded during installation)
 │   ├── serena/             # Code analysis MCP server
 │   └── context7/           # Library documentation MCP server
@@ -190,6 +194,16 @@ local-mcp-hub/
 ├── install.bat             # Windows installer
 └── .tmp/                   # Runtime logs and debug files (created when run)
 ```
+
+### Source Code Architecture
+
+The codebase follows a modular architecture with clear separation of concerns:
+
+- **`hub.ts`** - Main application server that coordinates all components
+- **`ollama-client.ts`** - Handles all communication with Ollama servers
+- **`mcp-manager.ts`** - Manages MCP process lifecycle and tool execution
+- **`tool-selector.ts`** - Implements intelligent tool selection using two-stage LLM process
+- **`request-processor.ts`** - Handles request parsing and response formatting
 
 ## Available Tools
 

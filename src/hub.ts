@@ -3,7 +3,11 @@ import cors from 'cors';
 import winston from 'winston';
 import fs from 'fs';
 import path from 'path';
-import { spawn, ChildProcess } from 'child_process';
+
+import { OllamaClient, OllamaConfig } from './ollama-client';
+import { MCPManager, MCPConfig, OpenAITool } from './mcp-manager';
+import { ToolSelector, ToolGuidanceConfig, ToolSelectionConfig, ArgumentGenerationConfig } from './tool-selector';
+import { RequestProcessor, ResponseGenerationConfig } from './request-processor';
 
 // Prompts configuration interfaces
 interface PromptConfig {
@@ -45,63 +49,19 @@ interface PromptsConfig {
   };
 }
 
-// Completion interfaces
-interface FIMRequest {
-  prefix: string;
-  suffix: string;
-  isFIM: boolean;
-}
 
-// OpenAI Tool interfaces
-interface OpenAITool {
-  type: 'function';
-  function: {
-    name: string;
-    description: string;
-    parameters: {
-      type: 'object';
-      properties: Record<string, any>;
-      required?: string[];
-    };
-  };
-}
 
-interface ToolCall {
-  id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
 
-interface ToolMessage {
-  role: 'tool';
-  content: string;
-  tool_call_id: string;
-}
-
-interface CompletionContext {
-  prefix: string;
-  suffix: string;
-  cleanPrefix: string;
-}
 
 // Configuration interface
 interface Config {
-  ollama: {
-    host: string;
-    model: string;
-    fast_model: string;
-  };
+  ollama: OllamaConfig;
   hub: {
     port: number;
-    log_level: string;
+    log_level?: string;
     cors_origins: string[];
   };
-  mcps: {
-    enabled: string[];
-  };
+  mcps: MCPConfig;
 }
 
 // Helper function for temp directory path (used before class instantiation)
@@ -161,16 +121,33 @@ class LocalMCPHub {
   private app: express.Application;
   private config: Config;
   private prompts: PromptsConfig;
-  private mcpToolSchemas: Map<string, OpenAITool> = new Map();
-  private schemasInitialized: boolean = false;
-  private mcpProcesses: Map<string, ChildProcess> = new Map();
-  private mcpProcessReady: Map<string, boolean> = new Map();
+  private ollamaClient: OllamaClient;
+  private mcpManager: MCPManager;
+  private toolSelector: ToolSelector;
+  private requestProcessor: RequestProcessor;
 
   constructor() {
     this.app = express();
     this.config = this.loadConfig();
     this.prompts = this.loadPrompts();
     this.ensureTmpDirectory();
+    
+    // Initialize extracted classes
+    this.ollamaClient = new OllamaClient(this.config.ollama, logger);
+    this.mcpManager = new MCPManager(this.config.mcps, logger);
+    this.toolSelector = new ToolSelector(
+      this.ollamaClient,
+      this.prompts.toolGuidance || {},
+      this.prompts.toolSelection as any,
+      this.prompts.argumentGeneration as any,
+      logger
+    );
+    this.requestProcessor = new RequestProcessor(
+      this.ollamaClient,
+      this.prompts.responseGeneration || {},
+      logger
+    );
+    
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -276,8 +253,8 @@ class LocalMCPHub {
         timestamp: new Date().toISOString(),
         ollama_host: this.config.ollama.host,
         mcps_enabled: this.config.mcps.enabled.length,
-        mcp_tools_initialized: this.schemasInitialized,
-        mcp_tools_count: this.mcpToolSchemas.size
+        mcp_tools_initialized: this.mcpManager.isInitialized,
+        mcp_tools_count: this.mcpManager.toolCount
       });
     });
 
@@ -299,8 +276,8 @@ class LocalMCPHub {
         
         if (hasToolResults) {
           // Generate final response using tool results
-          const response = await this.generateResponseWithToolResults(messages, temperature, max_tokens);
-          this.sendStreamingResponse(res, response);
+          const response = await this.requestProcessor.generateResponseWithToolResults(messages, temperature, max_tokens);
+          this.requestProcessor.sendStreamingResponse(res, response, this.config.ollama.model);
           return;
         }
         
@@ -310,23 +287,25 @@ class LocalMCPHub {
           logger.debug('Continue tools:', tools.map((t: OpenAITool) => t.function.name));
           
           // Check if MCP tools are initialized yet
-          if (!this.schemasInitialized) {
+          if (!this.mcpManager.isInitialized) {
             logger.warn('MCP tools not yet initialized, sending initialization message');
             const initMessage = this.prompts.systemMessages!.mcpInitializing!.template!
               .replace('{port}', this.config.hub.port.toString());
 
-            this.sendStreamingResponse(res, initMessage);
+            this.requestProcessor.sendStreamingResponse(res, initMessage, this.config.ollama.model);
             return;
           }
           
           // Replace Continue's tools with our MCP tools
           const toolsStartTime = Date.now();
-          const mcpTools = this.getOpenAITools();
+          const mcpTools = this.mcpManager.getOpenAITools().map(tool => 
+            this.toolSelector.enhanceToolWithUsageGuidance(tool)
+          );
           logTiming('MCP tools retrieval', toolsStartTime, { toolCount: mcpTools.length });
           logger.debug('Available MCP tools', { tools: mcpTools.map((t: OpenAITool) => t.function.name) });
           
           const selectionStartTime = Date.now();
-          const toolSelection = await this.selectToolWithLLM(messages, mcpTools);
+          const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools);
           logTiming('Tool selection', selectionStartTime);
           logger.info('Tool selected', { tool: toolSelection?.tool, hasArgs: !!toolSelection?.args });
           
@@ -334,13 +313,13 @@ class LocalMCPHub {
             logger.info(`Processing tool selection: ${toolSelection.tool}`);
             
             // Check if this is a safe tool that can be auto-executed
-            if (this.isSafeTool(toolSelection.tool)) {
+            if (this.toolSelector.isSafeTool(toolSelection.tool)) {
               logger.info(`Auto-executing safe tool: ${toolSelection.tool}`);
               
               try {
                 // Execute the tool automatically
                 const toolExecStartTime = Date.now();
-                const toolResult = await this.callMCPTool(toolSelection.tool, toolSelection.args);
+                const toolResult = await this.mcpManager.callMCPTool(toolSelection.tool, toolSelection.args);
                 logTiming(`Tool execution: ${toolSelection.tool}`, toolExecStartTime);
                 logger.info('Tool executed successfully', { resultLength: toolResult.length });
                 
@@ -360,7 +339,7 @@ class LocalMCPHub {
                 
                 const finalResponseStartTime = Date.now();
                 logger.info('Starting streaming final response generation');
-                await this.generateResponseWithToolResultsStreaming(messagesWithTool, temperature, max_tokens, res);
+                await this.requestProcessor.generateResponseWithToolResultsStreaming(messagesWithTool, temperature, max_tokens, res);
                 logTiming('Final response generation', finalResponseStartTime);
                 
                 logTiming('Total chat completion request', startTime);
@@ -374,7 +353,7 @@ class LocalMCPHub {
                   .replace('{toolName}', toolSelection.tool)
                   .replace('{error}', toolError instanceof Error ? toolError.message : 'Unknown error');
                 
-                this.sendStreamingResponse(res, permissionResponse);
+                this.requestProcessor.sendStreamingResponse(res, permissionResponse, this.config.ollama.model);
                 return;
               }
               
@@ -386,7 +365,7 @@ class LocalMCPHub {
                 .replace('{toolName}', toolSelection.tool)
                 .replace('{args}', JSON.stringify(toolSelection.args));
               
-              this.sendStreamingResponse(res, permissionMessage);
+              this.requestProcessor.sendStreamingResponse(res, permissionMessage, this.config.ollama.model);
               return;
             }
           }
@@ -394,14 +373,14 @@ class LocalMCPHub {
         
         // No tools needed, generate normal response
         const promptStartTime = Date.now();
-        const basePrompt = this.convertMessagesToPrompt(messages);
+        const basePrompt = this.requestProcessor.convertMessagesToPrompt(messages);
         const prompt = await this.enhancePromptWithTools(basePrompt);
         logTiming('Prompt preparation', promptStartTime);
         
         // Always send streaming response to Continue (ignoring stream parameter)
         const ollamaStartTime = Date.now();
         logger.info('Starting streaming response for regular chat');
-        await this.sendToOllamaStreaming(prompt, temperature, max_tokens, res);
+        await this.ollamaClient.sendToOllamaStreaming(prompt, temperature, max_tokens, res);
         logTiming('Ollama response', ollamaStartTime);
         
         logTiming('Total chat completion request', startTime);
@@ -438,7 +417,7 @@ class LocalMCPHub {
 
         // Parse FIM request and create context-aware completion
         
-        const fimRequest = this.parseFIMRequest(prompt);
+        const fimRequest = this.requestProcessor.parseFIMRequest(prompt);
         
         // Extract the immediate code before cursor (last line)
         const lines = fimRequest.prefix.split('\n');
@@ -459,7 +438,7 @@ class LocalMCPHub {
 
         // Get completion from Ollama using configured settings
         const completionConfig = this.prompts.codeCompletion.completion;
-        const rawSuggestion = await this.sendToOllama(completionPrompt, completionConfig.temperature, completionConfig.maxTokens, completionConfig.useFastModel);
+        const rawSuggestion = await this.ollamaClient.sendToOllama(completionPrompt, completionConfig.temperature, completionConfig.maxTokens, completionConfig.useFastModel);
         
         logger.info(`Raw Ollama response: ${rawSuggestion.substring(0, 200)}${rawSuggestion.length > 200 ? '...' : ''}`);
         
@@ -527,7 +506,7 @@ class LocalMCPHub {
 
     // List available tools (placeholder for now)
     this.app.get('/v1/tools', (req, res) => {
-      const tools = this.getAvailableTools();
+      const tools = this.mcpManager.getAvailableTools();
       res.json({ tools });
     });
 
@@ -567,317 +546,12 @@ class LocalMCPHub {
     });
   }
 
-  private convertMessagesToPrompt(messages: any[]): string {
-    return messages
-      .map(msg => `${msg.role}: ${msg.content}`)
-      .join('\n\n');
-  }
 
-  private async sendToOllama(prompt: string, temperature: number, maxTokens?: number, useFastModel: boolean = false): Promise<string> {
-    const model = useFastModel ? this.config.ollama.fast_model : this.config.ollama.model;
-    try {
-      const options: any = { temperature };
-      if (maxTokens !== undefined) {
-        options.num_predict = maxTokens;
-      }
 
-      const response = await fetch(`${this.config.ollama.host}/api/generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: model,
-          prompt: prompt,
-          stream: false,
-          options
-        })
-      });
 
-      if (!response.ok) {
-        throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
-      }
 
-      const data: any = await response.json();
-      
-      if (!data.response) {
-        throw new Error('No response from Ollama');
-      }
 
-      return data.response;
-    } catch (error) {
-      logger.error(`Failed to communicate with Ollama (${model}):`, error);
-      throw error;
-    }
-  }
 
-  private async sendToOllamaStreaming(
-    prompt: string, 
-    temperature: number, 
-    maxTokens: number, 
-    res: any,
-    useFastModel: boolean = false
-  ): Promise<void> {
-    const model = useFastModel ? this.config.ollama.fast_model : this.config.ollama.model;
-    
-    try {
-      logger.info('Starting Ollama streaming response');
-      
-      // Set SSE headers immediately
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Authorization, Content-Type'
-      });
-
-      const id = `chatcmpl-${Date.now()}`;
-      const created = Math.floor(Date.now() / 1000);
-      
-      const response = await fetch(`${this.config.ollama.host}/api/generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: model,
-          prompt: prompt,
-          stream: true, // Enable true streaming
-          options: {
-            temperature: temperature,
-            num_predict: maxTokens
-          }
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
-      }
-
-      if (!response.body) {
-        throw new Error('No response body from Ollama');
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let totalTokens = 0;
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          
-          if (done) break;
-          
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          
-          // Keep the last incomplete line in buffer
-          buffer = lines.pop() || '';
-          
-          for (const line of lines) {
-            if (line.trim()) {
-              try {
-                const data = JSON.parse(line);
-                
-                if (data.response) {
-                  // Send streaming chunk to Continue
-                  const streamChunk = {
-                    id,
-                    object: 'chat.completion.chunk',
-                    created,
-                    model: model,
-                    choices: [{
-                      index: 0,
-                      delta: { content: data.response },
-                      finish_reason: null
-                    }]
-                  };
-                  
-                  res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
-                  totalTokens++;
-                }
-                
-                if (data.done) {
-                  // Send final chunk
-                  const finalChunk = {
-                    id,
-                    object: 'chat.completion.chunk',
-                    created,
-                    model: model,
-                    choices: [{
-                      index: 0,
-                      delta: {},
-                      finish_reason: 'stop'
-                    }],
-                    usage: {
-                      prompt_tokens: this.estimateTokens(prompt),
-                      completion_tokens: totalTokens,
-                      total_tokens: this.estimateTokens(prompt) + totalTokens
-                    }
-                  };
-                  
-                  res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
-                  res.write('data: [DONE]\n\n');
-                  res.end();
-                  return;
-                }
-              } catch (e) {
-                logger.warn('Failed to parse Ollama streaming response:', line);
-              }
-            }
-          }
-        }
-      } finally {
-        reader.releaseLock();
-      }
-      
-    } catch (error) {
-      logger.error(`Failed to stream from Ollama (${model}):`, error);
-      
-      // Send error response
-      const errorChunk = {
-        id: `chatcmpl-${Date.now()}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: model,
-        choices: [{
-          index: 0,
-          delta: { content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}` },
-          finish_reason: 'stop'
-        }]
-      };
-      
-      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    }
-  }
-
-  private sendStreamingResponse(res: any, content: string, model?: string): void {
-    logger.info('Sending streaming response to Continue');
-    
-    // Set SSE headers
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Authorization, Content-Type'
-    });
-
-    const id = `chatcmpl-${Date.now()}`;
-    const created = Math.floor(Date.now() / 1000);
-    const responseModel = model || this.config.ollama.model;
-    
-    logger.debug('Streaming response details', {
-      contentLength: content.length,
-      model: responseModel,
-      responseId: id
-    });
-    
-    // Split response into chunks and send as streaming
-    const words = content.split(' ');
-    
-    for (let i = 0; i < words.length; i++) {
-      const chunk = words[i] + (i < words.length - 1 ? ' ' : '');
-      
-      const streamChunk = {
-        id,
-        object: 'chat.completion.chunk',
-        created,
-        model: responseModel,
-        choices: [{
-          index: 0,
-          delta: { content: chunk },
-          finish_reason: null
-        }]
-      };
-      
-      const chunkData = `data: ${JSON.stringify(streamChunk)}\n\n`;
-      res.write(chunkData);
-    }
-    
-    // Send final chunk with finish_reason
-    const finalChunk = {
-      id,
-      object: 'chat.completion.chunk',
-      created,
-      model: responseModel,
-      choices: [{
-        index: 0,
-        delta: {},
-        finish_reason: 'stop'
-      }],
-      usage: {
-        prompt_tokens: this.estimateTokens(content),
-        completion_tokens: words.length,
-        total_tokens: this.estimateTokens(content) + words.length
-      }
-    };
-    
-    const finalChunkData = `data: ${JSON.stringify(finalChunk)}\n\n`;
-    const doneData = 'data: [DONE]\n\n';
-    
-    logger.debug('Streaming response completed', { totalWords: words.length });
-    
-    res.write(finalChunkData);
-    res.write(doneData);
-    res.end();
-  }
-
-  private getAvailableTools(): string[] {
-    // Return actual tool names from loaded MCP schemas
-    return Array.from(this.mcpToolSchemas.keys());
-  }
-
-  private getOpenAITools(): OpenAITool[] {
-    logger.debug(`DEBUG: Getting OpenAI tools, schemasInitialized=${this.schemasInitialized}, schemas.size=${this.mcpToolSchemas.size}`);
-    
-    // Return cached real MCP schemas with usage guidance if available
-    if (this.schemasInitialized && this.mcpToolSchemas.size > 0) {
-      const tools = Array.from(this.mcpToolSchemas.values()).map(schema => 
-        this.enhanceToolWithUsageGuidance(schema)
-      );
-      
-      logger.debug(`DEBUG: Returning ${tools.length} enhanced tools`);
-      logger.debug(`DEBUG: Tool names: ${tools.map(t => t.function.name).join(', ')}`);
-      
-      // Check if the first tool has usage guidance
-      if (tools.length > 0) {
-        logger.debug(`DEBUG: First tool enhanced description: ${tools[0].function.description}`);
-      }
-      
-      return tools;
-    }
-    
-    // Fallback to empty array if schemas not loaded yet
-    logger.warn('MCP schemas not initialized yet, returning empty tools list');
-    return [];
-  }
-
-  private enhanceToolWithUsageGuidance(schema: OpenAITool): OpenAITool {
-    const guidance = this.getToolUsageGuidance(schema.function.name);
-    logger.debug(`DEBUG: Enhancing tool ${schema.function.name}, guidance found: ${guidance ? 'YES' : 'NO'}`);
-    
-    if (!guidance) return schema;
-
-    const enhanced = {
-      ...schema,
-      function: {
-        ...schema.function,
-        description: `${schema.function.description}. ${guidance}`
-      }
-    };
-    
-    logger.debug(`DEBUG: Enhanced ${schema.function.name} description: ${enhanced.function.description}`);
-    return enhanced;
-  }
-
-  private getToolUsageGuidance(toolName: string): string | null {
-    return this.prompts.toolGuidance?.usageHints?.[toolName] || null;
-  }
 
   public start(): void {
     const port = process.env.PORT ? parseInt(process.env.PORT) : this.config.hub.port;
@@ -885,19 +559,19 @@ class LocalMCPHub {
     // Set up graceful shutdown handlers
     process.on('SIGTERM', () => {
       logger.info('Received SIGTERM, shutting down gracefully...');
-      this.cleanup();
+      this.mcpManager.cleanup();
       process.exit(0);
     });
 
     process.on('SIGINT', () => {
       logger.info('Received SIGINT, shutting down gracefully...');
-      this.cleanup();
+      this.mcpManager.cleanup();
       process.exit(0);
     });
 
     process.on('uncaughtException', (error) => {
       logger.error('Uncaught exception:', error);
-      this.cleanup();
+      this.mcpManager.cleanup();
       process.exit(1);
     });
     
@@ -908,350 +582,17 @@ class LocalMCPHub {
       logger.info(`Connected to Ollama at: ${this.config.ollama.host}`);
       
       // Test Ollama connection on startup
-      this.testOllamaConnection();
+      this.ollamaClient.testConnection(this.prompts);
       
       // Initialize MCP tool schemas and keep processes alive
-      await this.initializeMCPSchemas();
+      await this.mcpManager.initializeMCPSchemas();
     });
   }
 
-  private async testOllamaConnection(): Promise<void> {
-    try {
-      logger.info('Testing connection to remote Ollama...');
-      
-      // Test main model
-      const mainTestConfig = this.prompts.connectionTest.main;
-      const response = await this.sendToOllama(mainTestConfig.message!, mainTestConfig.temperature, mainTestConfig.maxTokens, mainTestConfig.useFastModel);
-      logger.info(`✓ Main model (${this.config.ollama.model}) connection successful`);
-      logger.info(`✓ Response: ${response.substring(0, 100)}...`);
-      
-      // Test fast model
-      const fastTestConfig = this.prompts.connectionTest.fast;
-      const fastResponse = await this.sendToOllama(fastTestConfig.message!, fastTestConfig.temperature, fastTestConfig.maxTokens, fastTestConfig.useFastModel);
-      logger.info(`✓ Fast model (${this.config.ollama.fast_model}) connection successful`);
-      logger.info(`✓ Fast response: ${fastResponse.substring(0, 50)}...`);
-      
-    } catch (error) {
-      logger.error('✗ Failed to connect to Ollama:', error);
-      logger.error('Please ensure Ollama is running on the remote server and both models are available');
-    }
-  }
 
-  private estimateTokens(text: string): number {
-    // Simple token estimation (roughly 4 characters per token)
-    return Math.ceil(text.length / 4);
-  }
 
-  private async initializeMCPSchemas(): Promise<void> {
-    logger.info('Initializing MCP tool schemas...');
-    
-    // Get schemas from each enabled MCP server
-    for (const mcpName of this.config.mcps.enabled) {
-      try {
-        const schemas = await this.getMCPToolSchemas(mcpName);
-        schemas.forEach(schema => {
-          this.mcpToolSchemas.set(schema.function.name, schema);
-        });
-        logger.info(`Loaded ${schemas.length} tool schemas from ${mcpName}`);
-      } catch (error) {
-        logger.error(`Failed to load schemas from ${mcpName}:`, error);
-      }
-    }
-    
-    this.schemasInitialized = true;
-    logger.info(`Total MCP tools loaded: ${this.mcpToolSchemas.size}`);
-  }
 
-  private async getMCPToolSchemas(mcpName: string): Promise<OpenAITool[]> {
-    return new Promise((resolve, reject) => {
-      let mcpCommand: string;
-      let mcpArgs: string[];
 
-      if (mcpName === 'context7') {
-        mcpCommand = 'node';
-        mcpArgs = [path.join(__dirname, '..', 'mcps', 'context7', 'dist', 'index.js')];
-      } else if (mcpName === 'serena') {
-        mcpCommand = path.join(__dirname, '..', 'mcps', 'serena', '.venv', 'bin', 'python');
-        mcpArgs = [
-          path.join(__dirname, '..', 'mcps', 'serena', 'scripts', 'mcp_server.py'),
-          '--context', 'ide-assistant',
-          '--project', path.join(__dirname, '..'),
-          '--transport', 'stdio',
-          '--tool-timeout', '30',
-          '--log-level', 'WARNING'
-        ];
-      } else {
-        reject(new Error(`Unknown MCP server: ${mcpName}`));
-        return;
-      }
-
-      const mcpProcess = spawn(mcpCommand, mcpArgs, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: path.join(__dirname, '..')
-      });
-
-      // Store process in pool immediately
-      this.mcpProcesses.set(mcpName, mcpProcess);
-      this.mcpProcessReady.set(mcpName, false);
-
-      let responseBuffer = '';
-      let initialized = false;
-      const schemas: OpenAITool[] = [];
-
-      const handleResponse = (data: string) => {
-        responseBuffer += data;
-        const lines = responseBuffer.split('\n');
-        responseBuffer = lines.pop() || '';
-        
-        for (const line of lines) {
-          if (line.trim()) {
-            try {
-              const response = JSON.parse(line);
-              
-              if (response.id === 1 && !initialized) {
-                initialized = true;
-                logger.debug(`${mcpName} MCP server initialized`);
-                
-                // Send initialized notification to complete handshake
-                const initializedNotification = JSON.stringify({
-                  jsonrpc: '2.0',
-                  method: 'notifications/initialized',
-                  params: {}
-                });
-                mcpProcess.stdin?.write(initializedNotification + '\n');
-                logger.debug(`${mcpName} sent initialized notification`);
-                
-                // Follow proper MCP protocol: send tools/list after initialization
-                // For Serena, wait for language server ready signal; for others, send immediately
-                if (mcpName !== 'serena') {
-                  const toolsRequest = JSON.stringify({
-                    jsonrpc: '2.0',
-                    id: 2,
-                    method: 'tools/list',
-                    params: {}
-                  });
-                  mcpProcess.stdin?.write(toolsRequest + '\n');
-                  logger.debug(`${mcpName} sent tools/list request`);
-                }
-              } else if (response.id === 2 && response.result) {
-                // Tools list response - mark process as ready and resolve with schemas
-                const tools = response.result.tools || [];
-                for (const tool of tools) {
-                  schemas.push({
-                    type: 'function',
-                    function: {
-                      name: tool.name,
-                      description: tool.description,
-                      parameters: tool.inputSchema || {
-                        type: 'object',
-                        properties: {},
-                        required: []
-                      }
-                    }
-                  });
-                }
-                
-                // Mark process as ready for tool calls
-                this.mcpProcessReady.set(mcpName, true);
-                logger.info(`${mcpName} process initialized and ready for tool calls`);
-                resolve(schemas);
-                return;
-              }
-            } catch (e) {
-              // Ignore JSON parse errors
-            }
-          }
-        }
-      };
-
-      mcpProcess.stdout?.on('data', (data) => {
-        handleResponse(data.toString());
-      });
-
-      mcpProcess.stderr?.on('data', (data) => {
-        const stderr = data.toString();
-        logger.debug(`${mcpName} stderr:`, stderr.trim());
-        
-        // For Serena, wait for language server to be ready before sending tools/list
-        if (mcpName === 'serena' && stderr.includes('Language server initialization completed') && initialized) {
-          logger.info(`${mcpName} language server ready, sending tools/list`);
-          const toolsRequest = JSON.stringify({
-            jsonrpc: '2.0',
-            id: 2,
-            method: 'tools/list',
-            params: {}
-          });
-          mcpProcess.stdin?.write(toolsRequest + '\n');
-        }
-      });
-
-      mcpProcess.on('close', (code) => {
-        logger.warn(`${mcpName} process closed with code ${code}`);
-        this.mcpProcesses.delete(mcpName);
-        this.mcpProcessReady.delete(mcpName);
-        if (schemas.length === 0) {
-          reject(new Error(`Failed to get schemas from ${mcpName}`));
-        }
-      });
-
-      mcpProcess.on('error', (error) => {
-        logger.error(`${mcpName} process error:`, error);
-        this.mcpProcesses.delete(mcpName);
-        this.mcpProcessReady.delete(mcpName);
-        reject(error);
-      });
-
-      // Initialize
-      const initRequest = JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {
-          protocolVersion: '2025-06-18',
-          capabilities: { tools: {} },
-          clientInfo: { name: 'local-mcp-hub', version: '1.0.0' }
-        }
-      });
-
-      mcpProcess.stdin?.write(initRequest + '\n');
-
-      // Timeout
-      setTimeout(() => {
-        if (!this.mcpProcessReady.get(mcpName)) {
-          logger.error(`${mcpName} initialization timeout`);
-          mcpProcess.kill();
-          this.mcpProcesses.delete(mcpName);
-          this.mcpProcessReady.delete(mcpName);
-          reject(new Error(`Timeout getting schemas from ${mcpName}`));
-        }
-      }, 30000);
-    });
-  }
-
-  private async callMCPTool(toolName: string, args: any = {}): Promise<string> {
-    // Determine which MCP server to use based on tool name
-    let mcpName: string;
-    if (toolName.includes('resolve-library-id') || toolName.includes('get-library-docs')) {
-      mcpName = 'context7';
-    } else {
-      mcpName = 'serena';
-    }
-
-    // Check if we have a ready process for this MCP server
-    const process = this.mcpProcesses.get(mcpName);
-    const isReady = this.mcpProcessReady.get(mcpName);
-
-    if (!process || !isReady) {
-      throw new Error(`MCP server ${mcpName} is not available or not ready`);
-    }
-
-    return new Promise((resolve, reject) => {
-      const callStartTime = Date.now();
-      let responseBuffer = '';
-      let toolCallId = Date.now(); // Use timestamp as unique ID
-
-      const handleResponse = (data: string) => {
-        responseBuffer += data;
-        const lines = responseBuffer.split('\n');
-        
-        // Keep the last incomplete line in buffer
-        responseBuffer = lines.pop() || '';
-        
-        for (const line of lines) {
-          if (line.trim()) {
-            try {
-              const response = JSON.parse(line);
-              // Response logged by logMCPResponse helper
-              
-              // Look for our tool call response
-              if (response.id === toolCallId) {
-                logTiming(`MCP tool call: ${toolName}`, callStartTime);
-                
-                if (response.result) {
-                  // Extract the actual result data from MCP response structure
-                  let resultData = 'Tool executed successfully';
-                  
-                  if (response.result.structuredContent && response.result.structuredContent.result) {
-                    resultData = response.result.structuredContent.result;
-                  } else if (response.result.content && response.result.content.length > 0) {
-                    resultData = response.result.content[0].text || JSON.stringify(response.result.content);
-                  } else {
-                    resultData = JSON.stringify(response.result);
-                  }
-                  
-                  logMCPResponse(mcpName, toolName, true, { resultLength: resultData.length });
-                  logger.debug(`TOOL RESULT DEBUG: ${toolName}`, { 
-                    fullResult: resultData,
-                    resultPreview: resultData.substring(0, 200) + (resultData.length > 200 ? '...' : '')
-                  });
-                  cleanup();
-                  resolve(resultData);
-                } else if (response.error) {
-                  logMCPResponse(mcpName, toolName, false, response.error);
-                  cleanup();
-                  reject(new Error(`MCP tool error: ${response.error.message}`));
-                } else {
-                  logMCPResponse(mcpName, toolName, true);
-                  cleanup();
-                  resolve('Tool executed successfully');
-                }
-                return;
-              }
-            } catch (e) {
-              logger.warn('Failed to parse MCP response:', line);
-            }
-          }
-        }
-      };
-
-      let cleanup = () => {
-        process.stdout?.off('data', handleResponse);
-        process.stderr?.off('data', errorHandler);
-      };
-
-      const errorHandler = (data: Buffer) => {
-        logger.debug(`${mcpName} stderr:`, data.toString());
-      };
-
-      // Set up event listeners
-      process.stdout?.on('data', handleResponse);
-      process.stderr?.on('data', errorHandler);
-
-      // Send tool call request directly (no initialization needed - process is already ready)
-      const toolCallRequest = JSON.stringify({
-        jsonrpc: '2.0',
-        id: toolCallId,
-        method: 'tools/call',
-        params: {
-          name: toolName,
-          arguments: args
-        }
-      });
-
-      logMCPRequest(mcpName, toolName, args);
-      
-      try {
-        process.stdin?.write(toolCallRequest + '\n');
-      } catch (error) {
-        cleanup();
-        reject(new Error(`Failed to send tool call to ${mcpName}: ${error}`));
-        return;
-      }
-
-      // Timeout for this specific tool call
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error(`Tool call timeout for ${toolName}`));
-      }, 30000);
-
-      // Wrap cleanup and timeout clearing
-      const originalCleanup = cleanup;
-      cleanup = () => {
-        clearTimeout(timeout);
-        originalCleanup();
-      };
-    });
-  }
 
   private async enhancePromptWithTools(prompt: string): Promise<string> {
     // Simple heuristic to determine if we should use tools
@@ -1276,7 +617,7 @@ class LocalMCPHub {
 Local codebase analysis:
 - Main file: src/hub.ts
 - Contains LocalMCPHub class
-- Key methods: ${this.extractMethodNames(hubContent)}
+- Key methods: [methods extracted to separate classes]
 - File structure: ${fs.readdirSync(srcPath).join(', ')}
 
 Hub.ts content (first 1000 chars):
@@ -1296,283 +637,15 @@ ${hubContent.substring(0, 1000)}...
     return prompt;
   }
 
-  private extractMethodNames(code: string): string[] {
-    // Simple regex to extract method names
-    const methodRegex = /(?:private|public|async)?\s*([\w]+)\s*\([^)]*\)\s*[:{]/g;
-    const methods: string[] = [];
-    let match;
-    
-    while ((match = methodRegex.exec(code)) !== null) {
-      if (match[1] && !['if', 'for', 'while', 'switch'].includes(match[1])) {
-        methods.push(match[1]);
-      }
-    }
-    
-    return methods.slice(0, 10); // Limit to first 10 methods
-  }
-
-  private cleanup(): void {
-    logger.info('Cleaning up MCP processes...');
-    for (const [mcpName, process] of this.mcpProcesses) {
-      try {
-        logger.info(`Terminating ${mcpName} process`);
-        process.kill('SIGTERM');
-      } catch (error) {
-        logger.warn(`Failed to terminate ${mcpName} process:`, error);
-      }
-    }
-    this.mcpProcesses.clear();
-    this.mcpProcessReady.clear();
-  }
-
-  private async selectToolWithLLM(messages: any[], tools: OpenAITool[]): Promise<{tool: string, args: any} | null> {
-    const lastMessage = messages[messages.length - 1];
-    const userRequest = lastMessage.content;
-    
-    logger.debug(`DEBUG: User request: "${userRequest}"`);
-    logger.debug(`DEBUG: Number of tools: ${tools.length}`);
-    
-    // Stage 1: Select the tool using only names and USE WHEN descriptions
-    const toolNames = tools.map(tool => {
-      const guidance = this.getToolUsageGuidance(tool.function.name);
-      const shortDesc = tool.function.description.split('.')[0]; // Take first sentence only
-      return `- ${tool.function.name}: ${shortDesc}${guidance ? '. ' + guidance : ''}`;
-    }).join('\n');
-    
-    const toolSelectionTemplate = this.prompts.toolSelection.stage1.template!;
-    const toolSelectionPrompt = toolSelectionTemplate
-      .replace('{userRequest}', userRequest)
-      .replace('{toolNames}', toolNames);
-    
-    logger.debug(`DEBUG: Stage 1 prompt length: ${toolSelectionPrompt.length} chars`);
-    logger.debug(`DEBUG: Full Stage 1 prompt:\n${toolSelectionPrompt}`);
-    
-    try {
-      // Stage 1: Select the tool using fast model
-      const stage1StartTime = Date.now();
-      const stage1Config = this.prompts.toolSelection.stage1;
-      const toolResponse = await this.sendToOllama(toolSelectionPrompt, stage1Config.temperature, stage1Config.maxTokens, stage1Config.useFastModel);
-      logTiming(`Stage 1 tool selection (fast model)`, stage1StartTime);
-      const cleanToolResponse = toolResponse.trim().replace(/```json|```/g, '').trim();
-      
-      logger.debug(`DEBUG: Stage 1 response: "${cleanToolResponse}"`);
-      logger.info(`RAW LLM RESPONSE: "${toolResponse}"`);
-      logger.info(`CLEANED RESPONSE: "${cleanToolResponse}"`);
-      
-      let toolSelection;
-      try {
-        toolSelection = JSON.parse(cleanToolResponse);
-      } catch (parseError) {
-        logger.error(`Failed to parse tool selection JSON: ${parseError}`, { response: cleanToolResponse });
-        return null;
-      }
-      
-      if (!toolSelection.tool || toolSelection.tool === null) {
-        logger.info('No tool selected by LLM');
-        return null;
-      }
-      
-      // Find the selected tool
-      const selectedTool = tools.find(t => t.function.name === toolSelection.tool);
-      if (!selectedTool) {
-        logger.warn(`LLM selected non-existent tool: ${toolSelection.tool}`);
-        return null;
-      }
-      
-      logger.info(`Stage 1: LLM selected tool: ${toolSelection.tool}`);
-      
-      // Stage 2: Generate arguments using smart model selection
-      const stage2StartTime = Date.now();
-      let argsSelection;
-      
-      if (this.isSimpleArgumentGeneration(toolSelection.tool)) {
-        logger.info('Using fast model for simple argument generation', { tool: toolSelection.tool });
-        argsSelection = await this.generateArgsWithFastModel(userRequest, selectedTool);
-      } else {
-        logger.info(`🧠 Using full model for complex argument generation: ${toolSelection.tool}`);
-        argsSelection = await this.generateArgsWithFullModel(userRequest, selectedTool);
-      }
-      
-      const modelType = this.isSimpleArgumentGeneration(toolSelection.tool) ? 'fast model' : 'full model';
-      logTiming(`Stage 2 argument generation (${modelType})`, stage2StartTime);
-      logger.info(`Stage 2: Generated args: ${JSON.stringify(argsSelection.args)}`);
-      
-      return { 
-        tool: toolSelection.tool, 
-        args: argsSelection.args || {} 
-      };
-      
-    } catch (error) {
-      logger.error('Error in two-stage tool selection:', error);
-      return null;
-    }
-  }
 
 
-  private isSafeTool(toolName: string): boolean {
-    return this.prompts.toolGuidance?.safeTools?.includes(toolName) || false;
-  }
 
-  private isSimpleArgumentGeneration(toolName: string): boolean {
-    return this.prompts.toolGuidance?.fastModelTools?.includes(toolName) || false;
-  }
 
-  private async generateArgsWithFastModel(userRequest: string, toolSchema: OpenAITool): Promise<any> {
-    const params = Object.entries(toolSchema.function.parameters.properties || {})
-      .map(([name, schema]: [string, any]) => `- ${name} (${schema.type}): ${schema.description || 'No description'}`)
-      .join('\n');
-    
-    // Use configured prompt template for fast model
-    const fastArgsTemplate = this.prompts.argumentGeneration.fastModel.template!;
-    const argsPrompt = fastArgsTemplate
-      .replace('{toolName}', toolSchema.function.name)
-      .replace('{userRequest}', userRequest)
-      .replace('{params}', params);
-    
-    logger.debug(`DEBUG: Fast model Stage 2 prompt length: ${argsPrompt.length} chars`);
 
-    const fastArgsConfig = this.prompts.argumentGeneration.fastModel;
-    const argsResponse = await this.sendToOllama(argsPrompt, fastArgsConfig.temperature, fastArgsConfig.maxTokens, fastArgsConfig.useFastModel);
-    const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
-    
-    logger.debug(`DEBUG: Fast model Stage 2 response: "${cleanArgsResponse}"`);
 
-    const parsedArgs = JSON.parse(cleanArgsResponse);
-    
-    // Strip problematic parameters that the fast model incorrectly adds
-    if (parsedArgs.args && parsedArgs.args.max_answer_chars !== undefined) {
-      delete parsedArgs.args.max_answer_chars;
-      logger.debug('Stripped max_answer_chars from fast model response');
-    }
 
-    return parsedArgs;
-  }
 
-  private async generateArgsWithFullModel(userRequest: string, toolSchema: OpenAITool): Promise<any> {
-    const params = Object.entries(toolSchema.function.parameters.properties || {})
-      .map(([name, schema]: [string, any]) => `- ${name} (${schema.type}): ${schema.description || 'No description'}`)
-      .join('\n');
-      
-    // Use configured prompt template for full model
-    const fullArgsTemplate = this.prompts.argumentGeneration.fullModel.template!;
-    const argsPrompt = fullArgsTemplate
-      .replace('{userRequest}', userRequest)
-      .replace('{toolName}', toolSchema.function.name)
-      .replace('{toolDescription}', toolSchema.function.description)
-      .replace('{params}', params);
-    
-    logger.debug(`DEBUG: Full model Stage 2 prompt length: ${argsPrompt.length} chars`);
-    
-    const fullArgsConfig = this.prompts.argumentGeneration.fullModel;
-    const argsResponse = await this.sendToOllama(argsPrompt, fullArgsConfig.temperature, fullArgsConfig.maxTokens, fullArgsConfig.useFastModel);
-    const cleanArgsResponse = argsResponse.trim().replace(/```json|```/g, '').trim();
-    
-    logger.debug(`DEBUG: Full model Stage 2 response: "${cleanArgsResponse}"`);
-    
-    const parsedArgs = JSON.parse(cleanArgsResponse);
-    
-    // Filter out null values from full model response
-    if (parsedArgs.args && typeof parsedArgs.args === 'object') {
-      Object.keys(parsedArgs.args).forEach(key => {
-        if (parsedArgs.args[key] === null) {
-          delete parsedArgs.args[key];
-          logger.debug(`Filtered out null parameter: ${key}`);
-        }
-      });
-    }
 
-    return parsedArgs;
-  }
-
-  private async generateResponseWithToolResults(
-    messages: any[], 
-    temperature: number, 
-    maxTokens: number
-  ): Promise<string> {
-    // Find the tool results in the messages
-    const toolResults = messages.filter(msg => msg.role === 'tool');
-    const userMessages = messages.filter(msg => msg.role !== 'tool');
-    
-    // Create a prompt that includes the tool results
-    let prompt = this.convertMessagesToPrompt(userMessages);
-    
-    if (toolResults.length > 0) {
-      prompt += '\n\nTool Results:\n';
-      toolResults.forEach((result, index) => {
-        prompt += `Result ${index + 1}: ${result.content}\n`;
-      });
-      prompt += '\n' + this.prompts.responseGeneration!.toolResultsNonStreaming!.template!;
-    }
-    
-    return await this.sendToOllama(prompt, temperature, maxTokens);
-  }
-
-  private async generateResponseWithToolResultsStreaming(
-    messages: any[], 
-    temperature: number, 
-    maxTokens: number,
-    res: any
-  ): Promise<void> {
-    // Find the tool results in the messages
-    const toolResults = messages.filter(msg => msg.role === 'tool');
-    const userMessages = messages.filter(msg => msg.role !== 'tool');
-    
-    // Create a prompt that includes the tool results
-    let prompt = this.convertMessagesToPrompt(userMessages);
-    
-    if (toolResults.length > 0) {
-      prompt += '\n\nTool Execution Results:\n';
-      toolResults.forEach((result, index) => {
-        const toolName = result.name || 'unknown_tool';
-        const resultContent = result.content || '';
-        const isEmpty = !resultContent.trim() || resultContent.length < 5;
-        
-        prompt += `Tool ${index + 1}: ${toolName}\n`;
-        if (isEmpty) {
-          prompt += `Status: Executed successfully but returned no results\n`;
-        } else {
-          prompt += `Status: Executed successfully with results\n`;
-          prompt += `Output: ${resultContent}\n`;
-        }
-        prompt += '\n';
-      });
-      prompt += this.prompts.responseGeneration!.toolResultsStreaming!.template!;
-    }
-    
-    logger.debug('FINAL RESPONSE PROMPT DEBUG', {
-      promptLength: prompt.length,
-      toolResultsCount: toolResults.length,
-      fullPrompt: prompt
-    });
-    
-    await this.sendToOllamaStreaming(prompt, temperature, maxTokens, res);
-  }
-
-  // Completion handler methods
-  private parseFIMRequest(prompt: string): FIMRequest {
-    // Check if this is a FIM (Fill-In-Middle) request
-    if (!prompt.includes('<fim_prefix>') || !prompt.includes('<fim_suffix>')) {
-      return { prefix: prompt, suffix: '', isFIM: false };
-    }
-
-    // Find the last occurrence of the FIM pattern to handle embedded content correctly
-    const lastFimSuffixIndex = prompt.lastIndexOf('<fim_suffix>');
-    const lastFimMiddleIndex = prompt.lastIndexOf('<fim_middle>');
-    
-    if (lastFimSuffixIndex === -1 || lastFimMiddleIndex === -1) {
-      return { prefix: prompt, suffix: '', isFIM: false };
-    }
-    
-    // Extract prefix (everything between <fim_prefix> and the last <fim_suffix>)
-    const prefixStart = prompt.indexOf('<fim_prefix>') + '<fim_prefix>'.length;
-    const prefix = prompt.substring(prefixStart, lastFimSuffixIndex);
-    
-    // Extract suffix (everything between the last <fim_suffix> and <fim_middle>)
-    const suffixStart = lastFimSuffixIndex + '<fim_suffix>'.length;
-    const suffix = prompt.substring(suffixStart, lastFimMiddleIndex);
-    
-    return { prefix, suffix, isFIM: true };
-  }
 }
 
 // Start the hub
