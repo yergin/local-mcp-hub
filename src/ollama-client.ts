@@ -28,17 +28,29 @@ export class OllamaClient {
         options.num_predict = maxTokens;
       }
 
+      const requestBody = {
+        model: model,
+        prompt: prompt,
+        stream: false,
+        options,
+      };
+
+      // Debug logging: Complete HTTP request to Ollama
+      this.logger.debug('OLLAMA HTTP REQUEST', {
+        url: `${this.config.host}/api/generate`,
+        method: 'POST',
+        body: requestBody,
+        promptLength: prompt.length,
+        model: model,
+        useFastModel: useFastModel
+      });
+
       const response = await fetch(`${this.config.host}/api/generate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          model: model,
-          prompt: prompt,
-          stream: false,
-          options,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -46,6 +58,16 @@ export class OllamaClient {
       }
 
       const data: any = await response.json();
+
+      // Debug logging: Complete HTTP response from Ollama
+      this.logger.debug('OLLAMA HTTP RESPONSE', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: data,
+        responseLength: data.response?.length || 0,
+        model: model
+      });
 
       if (!data.response) {
         throw new Error('No response from Ollama');
@@ -82,20 +104,32 @@ export class OllamaClient {
       const id = `chatcmpl-${Date.now()}`;
       const created = Math.floor(Date.now() / 1000);
 
+      const requestBody = {
+        model: model,
+        prompt: prompt,
+        stream: true, // Enable true streaming
+        options: {
+          temperature: temperature,
+          num_predict: maxTokens,
+        },
+      };
+
+      // Debug logging: Complete streaming HTTP request to Ollama
+      this.logger.debug('OLLAMA STREAMING HTTP REQUEST', {
+        url: `${this.config.host}/api/generate`,
+        method: 'POST',
+        body: requestBody,
+        promptLength: prompt.length,
+        model: model,
+        useFastModel: useFastModel
+      });
+
       const response = await fetch(`${this.config.host}/api/generate`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          model: model,
-          prompt: prompt,
-          stream: true, // Enable true streaming
-          options: {
-            temperature: temperature,
-            num_predict: maxTokens,
-          },
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -143,6 +177,15 @@ export class OllamaClient {
                       },
                     ],
                   };
+
+                  // Debug logging: Individual streaming chunk (throttled)
+                  if (totalTokens % 10 === 0 || data.response.length > 10) {
+                    this.logger.debug('OLLAMA STREAM CHUNK', {
+                      chunkContent: data.response,
+                      chunkNumber: totalTokens + 1,
+                      model: model
+                    });
+                  }
 
                   res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
                   totalTokens++;

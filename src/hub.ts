@@ -241,12 +241,60 @@ class LocalMCPHub {
 
     // Request logging
     this.app.use((req, res, next) => {
+      // Single consolidated HTTP request log
       logger.info('HTTP request', {
         method: req.method,
         path: req.path,
         ip: req.ip,
         hasAuth: !!req.headers.authorization,
       });
+      
+      // Debug logging: Complete HTTP request details
+      logger.debug('HTTP REQUEST DETAILS', {
+        method: req.method,
+        url: req.url,
+        path: req.path,
+        query: req.query,
+        headers: req.headers,
+        ip: req.ip,
+        userAgent: req.get('User-Agent'),
+        contentType: req.get('Content-Type'),
+        contentLength: req.get('Content-Length'),
+        hasBody: req.method === 'POST' || req.method === 'PUT'
+      });
+      
+      // Intercept response for logging (only once per request)
+      if (!res.locals.logInterceptorApplied) {
+        res.locals.logInterceptorApplied = true;
+        
+        const originalSend = res.send;
+        const originalJson = res.json;
+        
+        res.send = function(body) {
+          logger.debug('HTTP RESPONSE (SEND)', {
+            statusCode: res.statusCode,
+            path: req.path,
+            method: req.method,
+            responseHeaders: res.getHeaders(),
+            bodyLength: typeof body === 'string' ? body.length : 0,
+            bodyPreview: typeof body === 'string' ? body.substring(0, 200) + '...' : 'non-string body'
+          });
+          return originalSend.call(this, body);
+        };
+        
+        res.json = function(obj) {
+          logger.debug('HTTP RESPONSE (JSON)', {
+            statusCode: res.statusCode,
+            path: req.path,
+            method: req.method,
+            responseHeaders: res.getHeaders(),
+            responseBodyType: typeof obj,
+            responseBodySize: JSON.stringify(obj).length
+          });
+          return originalJson.call(this, obj);
+        };
+      }
+      
       next();
     });
   }
@@ -269,7 +317,12 @@ class LocalMCPHub {
       const startTime = Date.now();
       try {
         logger.info('Chat completion request received');
-        logger.debug('Request body:', JSON.stringify(req.body, null, 2));
+        logger.debug('CHAT COMPLETION REQUEST BODY', {
+          fullRequestBody: req.body,
+          messagesCount: req.body.messages?.length || 0,
+          hasTools: !!(req.body.tools && req.body.tools.length > 0),
+          toolsCount: req.body.tools?.length || 0
+        });
 
         const {
           messages,
@@ -428,6 +481,15 @@ class LocalMCPHub {
         const prompt = await this.enhancePromptWithTools(basePrompt);
         logTiming('Prompt preparation', promptStartTime);
 
+        // Debug logging: Final prompt for regular chat
+        logger.debug('REGULAR CHAT PROMPT', {
+          basePrompt: basePrompt,
+          enhancedPrompt: prompt,
+          promptLength: prompt.length,
+          temperature: temperature,
+          maxTokens: max_tokens
+        });
+
         // Always send streaming response to Continue (ignoring stream parameter)
         const ollamaStartTime = Date.now();
         logger.info('Starting streaming response for regular chat');
@@ -450,6 +512,16 @@ class LocalMCPHub {
     this.app.post('/v1/completions', async (req, res) => {
       try {
         logger.info('Received completion request');
+        
+        // Debug logging: Full completion request body
+        logger.debug('COMPLETION REQUEST BODY', {
+          fullRequestBody: req.body,
+          promptLength: req.body.prompt?.length || 0,
+          hasPrompt: !!req.body.prompt,
+          stream: req.body.stream,
+          maxTokens: req.body.max_tokens,
+          temperature: req.body.temperature
+        });
 
         // Store first completion request for debugging
         const compreqPath = this.getTmpPath('compreq.json');
@@ -486,6 +558,17 @@ class LocalMCPHub {
           .replace('{filePath}', languageContext.replace('// Path: ', ''))
           .replace(/\{codeBeforeCursor\}/g, codeBeforeCursor)
           .replace(/\{codeSuffix\}/g, fimRequest.suffix);
+
+        // Debug logging: Code completion prompt construction
+        logger.debug('CODE COMPLETION PROMPT', {
+          originalPrompt: prompt,
+          fimRequest: fimRequest,
+          codeBeforeCursor: codeBeforeCursor,
+          languageContext: languageContext,
+          completionTemplate: completionTemplate,
+          finalCompletionPrompt: completionPrompt,
+          promptLength: completionPrompt.length
+        });
 
         // Get completion from Ollama using configured settings
         const completionConfig = this.prompts.codeCompletion.completion;

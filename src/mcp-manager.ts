@@ -130,6 +130,16 @@ export class MCPManager {
             try {
               const response = JSON.parse(line);
 
+              // Debug logging: MCP JSON-RPC response
+              this.logger.debug('MCP JSON-RPC RESPONSE', {
+                mcpName: mcpName,
+                messageId: response.id,
+                method: response.method || 'response',
+                hasResult: !!response.result,
+                hasError: !!response.error,
+                rawMessage: line.length > 1000 ? line.substring(0, 1000) + '...' : line
+              });
+
               if (response.id === 1 && !initialized) {
                 initialized = true;
                 this.logger.debug(`${mcpName} MCP server initialized`);
@@ -140,6 +150,13 @@ export class MCPManager {
                   method: 'notifications/initialized',
                   params: {},
                 });
+
+                // Debug logging: MCP initialized notification
+                this.logger.debug('MCP JSON-RPC REQUEST (INITIALIZED)', {
+                  mcpName: mcpName,
+                  message: initializedNotification
+                });
+
                 mcpProcess.stdin?.write(initializedNotification + '\n');
                 this.logger.debug(`${mcpName} sent initialized notification`);
 
@@ -151,6 +168,13 @@ export class MCPManager {
                     method: 'tools/list',
                     params: {},
                   });
+
+                  // Debug logging: MCP tools/list request
+                  this.logger.debug('MCP JSON-RPC REQUEST (TOOLS/LIST)', {
+                    mcpName: mcpName,
+                    message: toolsRequest
+                  });
+
                   mcpProcess.stdin?.write(toolsRequest + '\n');
                   this.logger.debug(`${mcpName} sent tools/list request`);
                 }
@@ -206,6 +230,13 @@ export class MCPManager {
             method: 'tools/list',
             params: {},
           });
+
+          // Debug logging: MCP tools/list request for Serena
+          this.logger.debug('MCP JSON-RPC REQUEST (TOOLS/LIST - SERENA)', {
+            mcpName: mcpName,
+            message: toolsRequest
+          });
+
           mcpProcess.stdin?.write(toolsRequest + '\n');
         }
       });
@@ -236,6 +267,12 @@ export class MCPManager {
           capabilities: { tools: {} },
           clientInfo: { name: 'local-mcp-hub', version: '1.0.0' },
         },
+      });
+
+      // Debug logging: MCP initialization request
+      this.logger.debug('MCP JSON-RPC REQUEST (INIT)', {
+        mcpName: mcpName,
+        message: initRequest
       });
 
       mcpProcess.stdin?.write(initRequest + '\n');
@@ -287,6 +324,17 @@ export class MCPManager {
           if (line.trim()) {
             try {
               const response = JSON.parse(line);
+
+              // Debug logging: MCP tool call response
+              this.logger.debug('MCP JSON-RPC RESPONSE (TOOLS/CALL)', {
+                mcpName: mcpName,
+                toolName: toolName,
+                responseId: response.id,
+                hasResult: !!response.result,
+                hasError: !!response.error,
+                resultSize: response.result ? JSON.stringify(response.result).length : 0,
+                rawMessage: line.length > 500 ? line.substring(0, 500) + '...' : line
+              });
 
               // Look for our tool call response
               if (response.id === toolCallId) {
@@ -361,6 +409,14 @@ export class MCPManager {
           name: toolName,
           arguments: args,
         },
+      });
+
+      // Debug logging: MCP tool call request
+      this.logger.debug('MCP JSON-RPC REQUEST (TOOLS/CALL)', {
+        mcpName: mcpName,
+        toolName: toolName,
+        message: toolCallRequest,
+        args: args
       });
 
       this.logger.debug(`MCP ${mcpName}: ${toolName}`, { params: args });

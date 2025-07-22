@@ -28,7 +28,17 @@ export class RequestProcessor {
   }
 
   convertMessagesToPrompt(messages: any[]): string {
-    return messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
+    const prompt = messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
+    
+    // Debug logging: Prompt conversion
+    this.logger.debug('PROMPT CONVERSION', {
+      messageCount: messages.length,
+      messages: messages,
+      finalPrompt: prompt,
+      promptLength: prompt.length
+    });
+    
+    return prompt;
   }
 
   parseFIMRequest(prompt: string): FIMRequest {
@@ -98,6 +108,14 @@ export class RequestProcessor {
         ],
       };
 
+      // Debug logging: Streaming response chunks to Continue
+      this.logger.debug('STREAMING CHUNK TO CONTINUE', {
+        chunkIndex: i,
+        totalChunks: words.length,
+        chunk: chunk,
+        streamChunk: streamChunk
+      });
+
       const chunkData = `data: ${JSON.stringify(streamChunk)}\n\n`;
       res.write(chunkData);
     }
@@ -152,6 +170,17 @@ export class RequestProcessor {
       prompt += '\n' + this.responseConfig.toolResultsNonStreaming!.template!;
     }
 
+    // Debug logging: Final response generation prompt
+    this.logger.debug('TOOL RESULTS PROMPT (NON-STREAMING)', {
+      originalMessageCount: messages.length,
+      toolResultsCount: toolResults.length,
+      userMessagesCount: userMessages.length,
+      finalPrompt: prompt,
+      promptLength: prompt.length,
+      temperature: temperature,
+      maxTokens: maxTokens
+    });
+
     return await this.ollamaClient.sendToOllama(prompt, temperature, maxTokens);
   }
 
@@ -187,10 +216,15 @@ export class RequestProcessor {
       prompt += this.responseConfig.toolResultsStreaming!.template!;
     }
 
-    this.logger.debug('FINAL RESPONSE PROMPT DEBUG', {
-      promptLength: prompt.length,
+    // Debug logging: Final streaming response generation prompt
+    this.logger.debug('TOOL RESULTS PROMPT (STREAMING)', {
+      originalMessageCount: messages.length,
       toolResultsCount: toolResults.length,
+      userMessagesCount: userMessages.length,
+      promptLength: prompt.length,
       fullPrompt: prompt,
+      temperature: temperature,
+      maxTokens: maxTokens
     });
 
     await this.ollamaClient.sendToOllamaStreaming(prompt, temperature, maxTokens, res);
