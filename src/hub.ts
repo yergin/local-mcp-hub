@@ -479,14 +479,12 @@ class LocalMCPHub {
 
         // No tools needed, generate normal response
         const promptStartTime = Date.now();
-        const basePrompt = this.requestProcessor.convertMessagesToPrompt(messages);
-        const prompt = await this.enhancePromptWithTools(basePrompt);
+        const prompt = this.requestProcessor.convertMessagesToPrompt(messages);
         logTiming('Prompt preparation', promptStartTime);
 
         // Debug logging: Final prompt for regular chat
         logger.debug('REGULAR CHAT PROMPT', {
-          basePrompt: basePrompt,
-          enhancedPrompt: prompt,
+          prompt: prompt,
           promptLength: prompt.length,
           temperature: temperature,
           maxTokens: max_tokens
@@ -747,49 +745,6 @@ class LocalMCPHub {
     });
   }
 
-  private async enhancePromptWithTools(prompt: string): Promise<string> {
-    // Simple heuristic to determine if we should use tools
-    const needsCodeAnalysis =
-      prompt.toLowerCase().includes('class') ||
-      prompt.toLowerCase().includes('method') ||
-      prompt.toLowerCase().includes('function') ||
-      prompt.toLowerCase().includes('code') ||
-      prompt.toLowerCase().includes('file');
-
-    if (needsCodeAnalysis) {
-      try {
-        // For now, use simple file reading instead of full MCP protocol
-        logger.info('Attempting to provide code context...');
-
-        const srcPath = path.join(__dirname, '..', 'src');
-        const hubFilePath = path.join(srcPath, 'hub.ts');
-
-        // Read the main hub file if it exists
-        if (fs.existsSync(hubFilePath)) {
-          const hubContent = fs.readFileSync(hubFilePath, 'utf-8');
-          const codeContext = `
-Local codebase analysis:
-- Main file: src/hub.ts
-- Contains LocalMCPHub class
-- Key methods: [methods extracted to separate classes]
-- File structure: ${fs.readdirSync(srcPath).join(', ')}
-
-Hub.ts content (first 1000 chars):
-${hubContent.substring(0, 1000)}...
-`;
-
-          return `${prompt}\n\n${codeContext}`;
-        }
-
-        return prompt;
-      } catch (error) {
-        logger.warn('Failed to get code context, continuing without tools:', error);
-        return prompt;
-      }
-    }
-
-    return prompt;
-  }
 }
 
 // Start the hub
