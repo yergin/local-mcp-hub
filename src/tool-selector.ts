@@ -118,11 +118,16 @@ export class ToolSelector {
     
     this.logger.debug(`DEBUG: Filtered to ${readOnlyTools.length} read-only tools from ${tools.length} total tools`);
     
+    // Create mapping from normalized names (underscores) to actual tool objects
+    const normalizedToolMap = new Map<string, OpenAITool>();
     const toolNames = readOnlyTools
       .map(tool => {
+        const normalizedName = tool.function.name.replace(/-/g, '_');
+        normalizedToolMap.set(normalizedName, tool);
+        
         const guidance = this.getToolUsageGuidance(tool.function.name);
         const shortDesc = tool.function.description.split('.')[0]; // Take first sentence only
-        return `- ${tool.function.name}: ${shortDesc}${guidance ? '. ' + guidance : ''}`;
+        return `- ${normalizedName}: ${shortDesc}${guidance ? '. ' + guidance : ''}`;
       })
       .join('\n');
 
@@ -169,14 +174,14 @@ export class ToolSelector {
         return null;
       }
 
-      // Find the selected tool (should be from read-only tools only)
-      const selectedTool = readOnlyTools.find(t => t.function.name === toolSelection.tool);
+      // Find the selected tool using normalized name mapping
+      const selectedTool = normalizedToolMap.get(toolSelection.tool);
       if (!selectedTool) {
         this.logger.warn(`LLM selected tool not in read-only list: ${toolSelection.tool}`);
         return null;
       }
 
-      this.logger.info(`Stage 1: LLM selected tool: ${toolSelection.tool}`);
+      this.logger.info(`Stage 1: LLM selected tool: ${toolSelection.tool} -> ${selectedTool.function.name}`);
 
       // Stage 2: Generate arguments using smart model selection
       const stage2StartTime = Date.now();
@@ -203,7 +208,7 @@ export class ToolSelector {
       this.logTiming('Total tool selection', startTime);
 
       return {
-        tool: toolSelection.tool,
+        tool: selectedTool.function.name,
         args: argsSelection.args || {},
       };
     } catch (error) {
