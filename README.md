@@ -52,7 +52,7 @@ A portable Model Context Protocol (MCP) hub that bridges VS Code Continue extens
 ### Clone Repository
 
 ```bash
-git clone https://github.com/your-repo/local-mcp-hub
+git clone https://github.com/yergin/local-mcp-hub
 cd local-mcp-hub
 ```
 
