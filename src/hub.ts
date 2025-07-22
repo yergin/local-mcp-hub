@@ -354,45 +354,37 @@ class LocalMCPHub {
           return;
         }
 
-        // Check if tools are available and replace with our MCP tools
-        if (tools && tools.length > 0) {
-          logger.info(`Tools received from Continue: ${tools.length} tools found`);
-          logger.debug(
-            'Continue tools:',
-            tools.map((t: OpenAITool) => t.function.name)
+        // Check if MCP tools are initialized yet
+        if (!this.mcpManager.isInitialized) {
+          logger.warn('MCP tools not yet initialized, sending initialization message');
+          const initMessage = this.prompts.systemMessages!.mcpInitializing!.template!.replace(
+            '{port}',
+            this.config.hub.port.toString()
           );
 
-          // Check if MCP tools are initialized yet
-          if (!this.mcpManager.isInitialized) {
-            logger.warn('MCP tools not yet initialized, sending initialization message');
-            const initMessage = this.prompts.systemMessages!.mcpInitializing!.template!.replace(
-              '{port}',
-              this.config.hub.port.toString()
-            );
+          this.requestProcessor.sendStreamingResponse(res, initMessage, this.config.ollama.model);
+          return;
+        }
 
-            this.requestProcessor.sendStreamingResponse(res, initMessage, this.config.ollama.model);
-            return;
-          }
+        // Always inject our MCP tools
+        const toolsStartTime = Date.now();
+        const mcpTools = this.mcpManager
+          .getOpenAITools()
+          .map(tool => this.toolSelector.enhanceToolWithUsageGuidance(tool));
+        logTiming('MCP tools retrieval', toolsStartTime, { toolCount: mcpTools.length });
+        logger.debug('Available MCP tools', {
+          tools: mcpTools.map((t: OpenAITool) => t.function.name),
+        });
 
-          // Replace Continue's tools with our MCP tools
-          const toolsStartTime = Date.now();
-          const mcpTools = this.mcpManager
-            .getOpenAITools()
-            .map(tool => this.toolSelector.enhanceToolWithUsageGuidance(tool));
-          logTiming('MCP tools retrieval', toolsStartTime, { toolCount: mcpTools.length });
-          logger.debug('Available MCP tools', {
-            tools: mcpTools.map((t: OpenAITool) => t.function.name),
-          });
+        const selectionStartTime = Date.now();
+        const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools);
+        logTiming('Tool selection', selectionStartTime);
+        logger.info('Tool selected', {
+          tool: toolSelection?.tool,
+          hasArgs: !!toolSelection?.args,
+        });
 
-          const selectionStartTime = Date.now();
-          const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools);
-          logTiming('Tool selection', selectionStartTime);
-          logger.info('Tool selected', {
-            tool: toolSelection?.tool,
-            hasArgs: !!toolSelection?.args,
-          });
-
-          if (toolSelection) {
+        if (toolSelection) {
             logger.info(`Processing tool selection: ${toolSelection.tool}`);
 
             // Check if this is a safe tool that can be auto-executed
@@ -475,7 +467,6 @@ class LocalMCPHub {
               return;
             }
           }
-        }
 
         // No tools needed, generate normal response
         const promptStartTime = Date.now();

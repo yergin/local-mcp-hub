@@ -70,7 +70,7 @@
       "summarize_changes": "USE WHEN: after completing code modifications to explain what was changed",
       "prepare_for_new_conversation": "USE WHEN: user explicitly requests preparation for ending current session",
       "initial_instructions": "USE WHEN: starting any programming task to get project-specific guidance",
-      "resolve-library-id": "USE WHEN: user asks for library documentation OR asks for a library ID for any package/library name",
+      "resolve-library-id": "USE WHEN: user asks for a library ID or as a first step in obtaining a library ID for library or package documentation before calling get-library-docs",
       "get-library-docs": "USE WHEN: retrieving documentation using a library ID that was previously obtained from resolve-library-id"
     },
     "fastModelTools": [
