@@ -15,7 +15,7 @@
   },
   "toolSelection": {
     "stage1": {
-      "template": "You are a helpful assistant that can use tools to help users.\n\nUser request: \"{userRequest}\"\n\nAvailable tools:\n{toolNames}\n\nINSTRUCTIONS:\n1. Check if the user's request matches any tool's \"USE WHEN\" criteria\n2. If a tool matches, respond with: {\"tool\": \"tool_name\"}\n3. If no tool matches, respond with: {\"tool\": null}\n\nRESPOND WITH ONLY THE JSON, NO OTHER TEXT.\n\nResponse:",
+      "template": "INFORMATION GATHERING PHASE\n\nUser request: \"{userRequest}\"\n\nAvailable information-gathering tools:\n{toolNames}\n\nSelect the BEST tool to gather relevant information for this request.\n\nRespond: {\"tool\": \"name\"} or {\"tool\": null}",
       "temperature": 0.1,
       "maxTokens": 100,
       "useFastModel": true
@@ -43,14 +43,14 @@
   },
   "toolGuidance": {
     "usageHints": {
-      "list_dir": "USE WHEN: user asks \"what files are in\", \"list files\", \"show directory contents\", \"what's in this folder\", \"explore directory structure\"",
-      "find_file": "USE WHEN: user wants to find files by NAME/PATH/EXTENSION like \"find config.json\", \"find *.js files\", \"where is package.json\", \"locate main.py\"",
+      "list_dir": "USE WHEN: user asks \"what files are in\", \"list files\", \"show directory contents\"",
+      "find_file": "USE WHEN: user wants to find files by name like \"find config.json\", \"find *.js files\", \"locate main.py\"",
       "replace_regex": "USE WHEN: user wants to replace, modify, or update text patterns across files like \"change all console.log to logger\", \"replace function name\", \"update imports\"",
-      "search_for_pattern": "USE WHEN: user wants to search for TEXT/CONTENT/PATTERNS inside files like \"search for TODO\", \"find all console.log\", \"what does this file do\", \"show me the imports\"",
+      "search_for_pattern": "USE WHEN: user wants to search for text inside files like \"search for TODO\", \"find all console.log\", \"show me the imports\"",
       "restart_language_server": "USE WHEN: user mentions language server errors, outdated symbols, or requests explicit restart of language analysis",
-      "get_symbols_overview": "USE WHEN: user wants to understand code structure like \"what classes are in this file\", \"show me the methods\", \"analyze this codebase\"",
-      "find_symbol": "USE WHEN: user looks for specific functions, classes, methods like \"find the authenticate method\", \"where is the User class\", \"show me all init functions\"",
-      "find_referencing_symbols": "USE WHEN: user wants to see where code is used like \"what calls this function\", \"find usages\", \"where is this class referenced\"",
+      "get_symbols_overview": "USE WHEN: user wants to understand code structure like \"what classes\", \"show me the methods\", \"analyze this codebase\"",
+      "find_symbol": "USE WHEN: user looks for specific functions, classes like \"find the authenticate method\", \"where is the User class\"",
+      "find_referencing_symbols": "USE WHEN: user wants to see where code is used like \"what calls this function\", \"find usages\"",
       "replace_symbol_body": "USE WHEN: user wants to replace entire function/method/class bodies like \"rewrite this function\", \"replace the method implementation\"",
       "insert_after_symbol": "USE WHEN: user wants to add new code after existing functions/classes like \"add a new method after this one\", \"insert function below\"",
       "insert_before_symbol": "USE WHEN: user wants to add code before existing functions/classes like \"add import statement\", \"insert helper function above\"",
@@ -83,7 +83,7 @@
       "resolve-library-id",
       "get-library-docs"
     ],
-    "safeTools": [
+    "readOnlyTools": [
       "list_dir",
       "find_file",
       "search_for_pattern",
@@ -108,7 +108,7 @@
   },
   "systemMessages": {
     "customSystemPrompt": {
-      "template": "You are an AI assistant called Jerry. You are a skilled developer with deep knowledge of programming languages, frameworks, and development best practices. If including code snippets, always start code blocks with the programming language and file name (e.g., ```{language} path/to/file). Please start by introducing your self.",
+      "template": "You are an AI assistant. You are a skilled developer with deep knowledge of programming languages, frameworks, and development best practices. If including code snippets, always start code blocks with the programming language and file name (e.g., ```{language} path/to/file).",
       "enabled": true
     },
     "mcpInitializing": {

@@ -5,7 +5,7 @@ import { OpenAITool } from './mcp-manager';
 export interface ToolGuidanceConfig {
   usageHints?: Record<string, string>;
   fastModelTools?: string[];
-  safeTools?: string[];
+  readOnlyTools?: string[];
 }
 
 export interface ToolSelectionConfig {
@@ -94,7 +94,7 @@ export class ToolSelector {
   }
 
   isSafeTool(toolName: string): boolean {
-    return this.toolGuidance.safeTools?.includes(toolName) || false;
+    return this.toolGuidance.readOnlyTools?.includes(toolName) || false;
   }
 
   private isSimpleArgumentGeneration(toolName: string): boolean {
@@ -112,8 +112,13 @@ export class ToolSelector {
     this.logger.debug(`DEBUG: User request: "${userRequest}"`);
     this.logger.debug(`DEBUG: Number of tools: ${tools.length}`);
 
-    // Stage 1: Select the tool using only names and USE WHEN descriptions
-    const toolNames = tools
+    // Stage 1: Select only from read-only tools for information gathering
+    const readOnlyToolNames = this.toolGuidance.readOnlyTools || [];
+    const readOnlyTools = tools.filter(tool => readOnlyToolNames.includes(tool.function.name));
+    
+    this.logger.debug(`DEBUG: Filtered to ${readOnlyTools.length} read-only tools from ${tools.length} total tools`);
+    
+    const toolNames = readOnlyTools
       .map(tool => {
         const guidance = this.getToolUsageGuidance(tool.function.name);
         const shortDesc = tool.function.description.split('.')[0]; // Take first sentence only
@@ -164,10 +169,10 @@ export class ToolSelector {
         return null;
       }
 
-      // Find the selected tool
-      const selectedTool = tools.find(t => t.function.name === toolSelection.tool);
+      // Find the selected tool (should be from read-only tools only)
+      const selectedTool = readOnlyTools.find(t => t.function.name === toolSelection.tool);
       if (!selectedTool) {
-        this.logger.warn(`LLM selected non-existent tool: ${toolSelection.tool}`);
+        this.logger.warn(`LLM selected tool not in read-only list: ${toolSelection.tool}`);
         return null;
       }
 
