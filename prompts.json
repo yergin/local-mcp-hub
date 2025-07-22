@@ -107,6 +107,10 @@
     }
   },
   "systemMessages": {
+    "customSystemPrompt": {
+      "template": "You are an AI assistant called Jerry. You are a skilled developer with deep knowledge of programming languages, frameworks, and development best practices. If including code snippets, always start code blocks with the programming language and file name (e.g., ```{language} path/to/file). Please start by introducing your self.",
+      "enabled": true
+    },
     "mcpInitializing": {
       "template": "Local MCP Hub is still initializing the code analysis tools (Serena & Context7). This usually takes 10-30 seconds after startup. Please try your request again in a moment.\n\nCurrent status:\n- Hub server: Running\n- Ollama connection: Connected\n- MCP tools: Loading...\n\nYou can check initialization status at: http://localhost:{port}/health"
     },

@@ -56,6 +56,17 @@ export class ToolSelector {
     this.logger = logger;
   }
 
+  updateConfig(
+    toolGuidance: ToolGuidanceConfig,
+    toolSelectionConfig: ToolSelectionConfig,
+    argumentGenerationConfig: ArgumentGenerationConfig
+  ): void {
+    this.toolGuidance = toolGuidance;
+    this.toolSelectionConfig = toolSelectionConfig;
+    this.argumentGenerationConfig = argumentGenerationConfig;
+    this.logger.debug('ToolSelector configuration updated');
+  }
+
   enhanceToolWithUsageGuidance(schema: OpenAITool): OpenAITool {
     const guidance = this.getToolUsageGuidance(schema.function.name);
     this.logger.debug(

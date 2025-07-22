@@ -12,7 +12,7 @@ import {
   ToolSelectionConfig,
   ArgumentGenerationConfig,
 } from './tool-selector';
-import { RequestProcessor, ResponseGenerationConfig } from './request-processor';
+import { RequestProcessor, ResponseGenerationConfig, SystemMessageConfig } from './request-processor';
 
 // Prompts configuration interfaces
 interface PromptConfig {
@@ -48,6 +48,7 @@ interface PromptsConfig {
     toolResultsNonStreaming?: { template?: string };
   };
   systemMessages?: {
+    customSystemPrompt?: { template?: string; enabled?: boolean };
     mcpInitializing?: { template?: string };
     toolPermissionError?: { template?: string };
     toolPermissionRequest?: { template?: string };
@@ -146,6 +147,7 @@ class LocalMCPHub {
     this.requestProcessor = new RequestProcessor(
       this.ollamaClient,
       this.prompts.responseGeneration || {},
+      this.prompts.systemMessages || {},
       logger
     );
 
@@ -679,6 +681,19 @@ class LocalMCPHub {
     this.app.post('/v1/admin/reload-prompts', (req, res) => {
       try {
         this.prompts = this.loadPrompts();
+        
+        // Update all components with new prompts configuration
+        this.toolSelector.updateConfig(
+          this.prompts.toolGuidance || {},
+          this.prompts.toolSelection as any,
+          this.prompts.argumentGeneration as any
+        );
+        
+        this.requestProcessor.updateConfig(
+          this.prompts.responseGeneration || {},
+          this.prompts.systemMessages || {}
+        );
+        
         logger.info('Prompts configuration reloaded successfully');
         res.json({
           success: true,

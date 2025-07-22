@@ -12,22 +12,63 @@ export interface ResponseGenerationConfig {
   toolResultsNonStreaming?: { template?: string };
 }
 
+export interface SystemMessageConfig {
+  customSystemPrompt?: { template?: string; enabled?: boolean };
+}
+
 export class RequestProcessor {
   private logger: winston.Logger;
   private ollamaClient: OllamaClient;
   private responseConfig: ResponseGenerationConfig;
+  private systemConfig: SystemMessageConfig;
 
   constructor(
     ollamaClient: OllamaClient,
     responseConfig: ResponseGenerationConfig,
+    systemConfig: SystemMessageConfig,
     logger: winston.Logger
   ) {
     this.ollamaClient = ollamaClient;
     this.responseConfig = responseConfig;
+    this.systemConfig = systemConfig;
     this.logger = logger;
   }
 
+  updateConfig(responseConfig: ResponseGenerationConfig, systemConfig: SystemMessageConfig): void {
+    this.responseConfig = responseConfig;
+    this.systemConfig = systemConfig;
+    this.logger.debug('RequestProcessor configuration updated');
+  }
+
   convertMessagesToPrompt(messages: any[]): string {
+    // Check if we should override the system prompt
+    const customSystem = this.systemConfig.customSystemPrompt;
+    if (customSystem?.enabled && customSystem.template) {
+      // Replace system message with custom one
+      const modifiedMessages = messages.map(msg => {
+        if (msg.role === 'system') {
+          this.logger.info('Overriding Continue system prompt with custom prompt from prompts.json');
+          return { ...msg, content: customSystem.template };
+        }
+        return msg;
+      });
+      
+      const prompt = modifiedMessages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
+      
+      // Debug logging: Prompt conversion with override
+      this.logger.debug('PROMPT CONVERSION (WITH CUSTOM SYSTEM)', {
+        messageCount: modifiedMessages.length,
+        messages: modifiedMessages,
+        originalSystemPrompt: messages.find(m => m.role === 'system')?.content?.substring(0, 200),
+        customSystemPrompt: customSystem.template.substring(0, 200),
+        finalPrompt: prompt.substring(0, 500),
+        promptLength: prompt.length
+      });
+      
+      return prompt;
+    }
+    
+    // Use original messages if custom system prompt is disabled
     const prompt = messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
     
     // Debug logging: Prompt conversion
