@@ -6,7 +6,12 @@ import path from 'path';
 
 import { OllamaClient, OllamaConfig } from './ollama-client';
 import { MCPManager, MCPConfig, OpenAITool } from './mcp-manager';
-import { ToolSelector, ToolGuidanceConfig, ToolSelectionConfig, ArgumentGenerationConfig } from './tool-selector';
+import {
+  ToolSelector,
+  ToolGuidanceConfig,
+  ToolSelectionConfig,
+  ArgumentGenerationConfig,
+} from './tool-selector';
 import { RequestProcessor, ResponseGenerationConfig } from './request-processor';
 
 // Prompts configuration interfaces
@@ -49,10 +54,6 @@ interface PromptsConfig {
   };
 }
 
-
-
-
-
 // Configuration interface
 interface Config {
   ollama: OllamaConfig;
@@ -93,13 +94,13 @@ const logger = winston.createLogger({
         winston.format.printf(({ level, message, timestamp }) => {
           return `${timestamp} [${level}] ${message}`;
         })
-      )
+      ),
     }),
-    new winston.transports.File({ 
+    new winston.transports.File({
       filename: getTmpPath('local-mcp-hub.log'),
-      format: winston.format.json()
-    })
-  ]
+      format: winston.format.json(),
+    }),
+  ],
 });
 
 // Helper functions for consistent logging
@@ -131,7 +132,7 @@ class LocalMCPHub {
     this.config = this.loadConfig();
     this.prompts = this.loadPrompts();
     this.ensureTmpDirectory();
-    
+
     // Initialize extracted classes
     this.ollamaClient = new OllamaClient(this.config.ollama, logger);
     this.mcpManager = new MCPManager(this.config.mcps, logger);
@@ -147,7 +148,7 @@ class LocalMCPHub {
       this.prompts.responseGeneration || {},
       logger
     );
-    
+
     this.setupMiddleware();
     this.setupRoutes();
   }
@@ -157,15 +158,15 @@ class LocalMCPHub {
       const configPath = path.join(__dirname, '..', 'config.json');
       const configData = fs.readFileSync(configPath, 'utf-8');
       const config = JSON.parse(configData) as Config;
-      
+
       // Update logger level based on config and environment variable
       const logLevel = config.hub.log_level || process.env.LOG_LEVEL || 'info';
       logger.level = logLevel;
-      
-      logger.info('Configuration loaded', { 
-        ollamaHost: config.ollama.host, 
+
+      logger.info('Configuration loaded', {
+        ollamaHost: config.ollama.host,
         port: config.hub.port,
-        logLevel: logLevel 
+        logLevel: logLevel,
       });
       return config;
     } catch (error) {
@@ -201,45 +202,50 @@ class LocalMCPHub {
 
   private setupMiddleware(): void {
     // Enhanced CORS configuration for Continue extension compatibility
-    this.app.use(cors({
-      origin: this.config.hub.cors_origins || ['*'],
-      credentials: true,
-      allowedHeaders: [
-        'Authorization',
-        'Content-Type', 
-        'Accept',
-        'Origin',
-        'X-Requested-With',
-        'Cache-Control'
-      ],
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      exposedHeaders: ['Content-Type', 'Cache-Control', 'Connection']
-    }));
+    this.app.use(
+      cors({
+        origin: this.config.hub.cors_origins || ['*'],
+        credentials: true,
+        allowedHeaders: [
+          'Authorization',
+          'Content-Type',
+          'Accept',
+          'Origin',
+          'X-Requested-With',
+          'Cache-Control',
+        ],
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        exposedHeaders: ['Content-Type', 'Cache-Control', 'Connection'],
+      })
+    );
 
     // Additional CORS headers for streaming
     this.app.use((req, res, next) => {
       res.header('Access-Control-Allow-Origin', '*');
-      res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, Origin, X-Requested-With, Cache-Control');
+      res.header(
+        'Access-Control-Allow-Headers',
+        'Authorization, Content-Type, Accept, Origin, X-Requested-With, Cache-Control'
+      );
       res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       res.header('Access-Control-Expose-Headers', 'Content-Type, Cache-Control, Connection');
-      
+
       if (req.method === 'OPTIONS') {
         res.status(200).end();
         return;
       }
       next();
     });
-    
+
     this.app.use(express.json({ limit: '50mb' }));
     this.app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-    
+
     // Request logging
     this.app.use((req, res, next) => {
       logger.info('HTTP request', {
         method: req.method,
         path: req.path,
         ip: req.ip,
-        hasAuth: !!req.headers.authorization
+        hasAuth: !!req.headers.authorization,
       });
       next();
     });
@@ -248,13 +254,13 @@ class LocalMCPHub {
   private setupRoutes(): void {
     // Health check
     this.app.get('/health', (req, res) => {
-      res.json({ 
-        status: 'healthy', 
+      res.json({
+        status: 'healthy',
         timestamp: new Date().toISOString(),
         ollama_host: this.config.ollama.host,
         mcps_enabled: this.config.mcps.enabled.length,
         mcp_tools_initialized: this.mcpManager.isInitialized,
-        mcp_tools_count: this.mcpManager.toolCount
+        mcp_tools_count: this.mcpManager.toolCount,
       });
     });
 
@@ -264,134 +270,178 @@ class LocalMCPHub {
       try {
         logger.info('Chat completion request received');
         logger.debug('Request body:', JSON.stringify(req.body, null, 2));
-        
-        const { messages, model, temperature = 0.7, max_tokens = 4000, stream = false, tools, tool_choice } = req.body;
-        
+
+        const {
+          messages,
+          model,
+          temperature = 0.7,
+          max_tokens = 4000,
+          stream = false,
+          tools,
+          tool_choice,
+        } = req.body;
+
         if (!messages || !Array.isArray(messages)) {
           return res.status(400).json({ error: 'Invalid messages format' });
         }
 
         // Check if this is a tool call response (messages contain tool results)
         const hasToolResults = messages.some(msg => msg.role === 'tool');
-        
+
         if (hasToolResults) {
           // Generate final response using tool results
-          const response = await this.requestProcessor.generateResponseWithToolResults(messages, temperature, max_tokens);
+          const response = await this.requestProcessor.generateResponseWithToolResults(
+            messages,
+            temperature,
+            max_tokens
+          );
           this.requestProcessor.sendStreamingResponse(res, response, this.config.ollama.model);
           return;
         }
-        
+
         // Check if tools are available and replace with our MCP tools
         if (tools && tools.length > 0) {
           logger.info(`Tools received from Continue: ${tools.length} tools found`);
-          logger.debug('Continue tools:', tools.map((t: OpenAITool) => t.function.name));
-          
+          logger.debug(
+            'Continue tools:',
+            tools.map((t: OpenAITool) => t.function.name)
+          );
+
           // Check if MCP tools are initialized yet
           if (!this.mcpManager.isInitialized) {
             logger.warn('MCP tools not yet initialized, sending initialization message');
-            const initMessage = this.prompts.systemMessages!.mcpInitializing!.template!
-              .replace('{port}', this.config.hub.port.toString());
+            const initMessage = this.prompts.systemMessages!.mcpInitializing!.template!.replace(
+              '{port}',
+              this.config.hub.port.toString()
+            );
 
             this.requestProcessor.sendStreamingResponse(res, initMessage, this.config.ollama.model);
             return;
           }
-          
+
           // Replace Continue's tools with our MCP tools
           const toolsStartTime = Date.now();
-          const mcpTools = this.mcpManager.getOpenAITools().map(tool => 
-            this.toolSelector.enhanceToolWithUsageGuidance(tool)
-          );
+          const mcpTools = this.mcpManager
+            .getOpenAITools()
+            .map(tool => this.toolSelector.enhanceToolWithUsageGuidance(tool));
           logTiming('MCP tools retrieval', toolsStartTime, { toolCount: mcpTools.length });
-          logger.debug('Available MCP tools', { tools: mcpTools.map((t: OpenAITool) => t.function.name) });
-          
+          logger.debug('Available MCP tools', {
+            tools: mcpTools.map((t: OpenAITool) => t.function.name),
+          });
+
           const selectionStartTime = Date.now();
           const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools);
           logTiming('Tool selection', selectionStartTime);
-          logger.info('Tool selected', { tool: toolSelection?.tool, hasArgs: !!toolSelection?.args });
-          
+          logger.info('Tool selected', {
+            tool: toolSelection?.tool,
+            hasArgs: !!toolSelection?.args,
+          });
+
           if (toolSelection) {
             logger.info(`Processing tool selection: ${toolSelection.tool}`);
-            
+
             // Check if this is a safe tool that can be auto-executed
             if (this.toolSelector.isSafeTool(toolSelection.tool)) {
               logger.info(`Auto-executing safe tool: ${toolSelection.tool}`);
-              
+
               try {
                 // Execute the tool automatically
                 const toolExecStartTime = Date.now();
-                const toolResult = await this.mcpManager.callMCPTool(toolSelection.tool, toolSelection.args);
+                const toolResult = await this.mcpManager.callMCPTool(
+                  toolSelection.tool,
+                  toolSelection.args
+                );
                 logTiming(`Tool execution: ${toolSelection.tool}`, toolExecStartTime);
                 logger.info('Tool executed successfully', { resultLength: toolResult.length });
-                
+
                 // Create messages with tool result for final response
                 const messagesWithTool = [
                   ...messages,
                   {
-                    role: 'assistant', 
-                    content: `I'll use the ${toolSelection.tool} tool to help answer your question.`
+                    role: 'assistant',
+                    content: `I'll use the ${toolSelection.tool} tool to help answer your question.`,
                   },
                   {
                     role: 'tool',
                     content: toolResult,
-                    name: toolSelection.tool
-                  }
+                    name: toolSelection.tool,
+                  },
                 ];
-                
+
                 const finalResponseStartTime = Date.now();
                 logger.info('Starting streaming final response generation');
-                await this.requestProcessor.generateResponseWithToolResultsStreaming(messagesWithTool, temperature, max_tokens, res);
+                await this.requestProcessor.generateResponseWithToolResultsStreaming(
+                  messagesWithTool,
+                  temperature,
+                  max_tokens,
+                  res
+                );
                 logTiming('Final response generation', finalResponseStartTime);
-                
+
                 logTiming('Total chat completion request', startTime);
                 return;
-                
               } catch (toolError) {
                 logger.error('Tool execution failed:', toolError);
-                
+
                 // Fall back to asking for permission
-                const permissionResponse = this.prompts.systemMessages!.toolPermissionError!.template!
-                  .replace('{toolName}', toolSelection.tool)
-                  .replace('{error}', toolError instanceof Error ? toolError.message : 'Unknown error');
-                
-                this.requestProcessor.sendStreamingResponse(res, permissionResponse, this.config.ollama.model);
+                const permissionResponse = this.prompts
+                  .systemMessages!.toolPermissionError!.template!.replace(
+                    '{toolName}',
+                    toolSelection.tool
+                  )
+                  .replace(
+                    '{error}',
+                    toolError instanceof Error ? toolError.message : 'Unknown error'
+                  );
+
+                this.requestProcessor.sendStreamingResponse(
+                  res,
+                  permissionResponse,
+                  this.config.ollama.model
+                );
                 return;
               }
-              
             } else {
               // Ask for permission for potentially unsafe tools
               logger.info(`Asking permission for potentially unsafe tool: ${toolSelection.tool}`);
-              
-              const permissionMessage = this.prompts.systemMessages!.toolPermissionRequest!.template!
-                .replace('{toolName}', toolSelection.tool)
+
+              const permissionMessage = this.prompts
+                .systemMessages!.toolPermissionRequest!.template!.replace(
+                  '{toolName}',
+                  toolSelection.tool
+                )
                 .replace('{args}', JSON.stringify(toolSelection.args));
-              
-              this.requestProcessor.sendStreamingResponse(res, permissionMessage, this.config.ollama.model);
+
+              this.requestProcessor.sendStreamingResponse(
+                res,
+                permissionMessage,
+                this.config.ollama.model
+              );
               return;
             }
           }
         }
-        
+
         // No tools needed, generate normal response
         const promptStartTime = Date.now();
         const basePrompt = this.requestProcessor.convertMessagesToPrompt(messages);
         const prompt = await this.enhancePromptWithTools(basePrompt);
         logTiming('Prompt preparation', promptStartTime);
-        
+
         // Always send streaming response to Continue (ignoring stream parameter)
         const ollamaStartTime = Date.now();
         logger.info('Starting streaming response for regular chat');
         await this.ollamaClient.sendToOllamaStreaming(prompt, temperature, max_tokens, res);
         logTiming('Ollama response', ollamaStartTime);
-        
+
         logTiming('Total chat completion request', startTime);
-        
+
         logger.info('Successfully processed chat completion');
-        
       } catch (error) {
         logger.error('Error in chat completion:', error);
-        res.status(500).json({ 
+        res.status(500).json({
           error: 'Internal server error',
-          message: error instanceof Error ? error.message : 'Unknown error'
+          message: error instanceof Error ? error.message : 'Unknown error',
         });
       }
     });
@@ -400,7 +450,7 @@ class LocalMCPHub {
     this.app.post('/v1/completions', async (req, res) => {
       try {
         logger.info('Received completion request');
-        
+
         // Store first completion request for debugging
         const compreqPath = this.getTmpPath('compreq.json');
         if (!fs.existsSync(compreqPath)) {
@@ -408,26 +458,27 @@ class LocalMCPHub {
           fs.writeFileSync(compreqPath, JSON.stringify(req.body, null, 2));
           logger.debug('Stored completion request for debugging', { path: compreqPath });
         }
-        
+
         const { prompt, max_tokens = 50, temperature = 0.2, stream = false } = req.body;
-        
+
         if (!prompt) {
           return res.status(400).json({ error: 'Prompt is required' });
         }
 
         // Parse FIM request and create context-aware completion
-        
+
         const fimRequest = this.requestProcessor.parseFIMRequest(prompt);
-        
+
         // Extract the immediate code before cursor (last line)
         const lines = fimRequest.prefix.split('\n');
         const codeBeforeCursor = lines[lines.length - 1] || '';
-        
+
         // Extract only the last file path for language context
         const filePathLines = lines
           .filter(line => line.trim().startsWith('// Path: '))
           .map(line => line.trim());
-        const languageContext = filePathLines.length > 0 ? filePathLines[filePathLines.length - 1] : '';
+        const languageContext =
+          filePathLines.length > 0 ? filePathLines[filePathLines.length - 1] : '';
 
         // Create context-aware completion prompt using template
         const completionTemplate = this.prompts.codeCompletion.completion.template!;
@@ -438,15 +489,24 @@ class LocalMCPHub {
 
         // Get completion from Ollama using configured settings
         const completionConfig = this.prompts.codeCompletion.completion;
-        const rawSuggestion = await this.ollamaClient.sendToOllama(completionPrompt, completionConfig.temperature, completionConfig.maxTokens, completionConfig.useFastModel);
-        
-        logger.info(`Raw Ollama response: ${rawSuggestion.substring(0, 200)}${rawSuggestion.length > 200 ? '...' : ''}`);
-        
+        const rawSuggestion = await this.ollamaClient.sendToOllama(
+          completionPrompt,
+          completionConfig.temperature,
+          completionConfig.maxTokens,
+          completionConfig.useFastModel
+        );
+
+        logger.info(
+          `Raw Ollama response: ${rawSuggestion.substring(0, 200)}${rawSuggestion.length > 200 ? '...' : ''}`
+        );
+
         // Trim the prefix from the response to get just the completion
         let suggestion = rawSuggestion;
         if (rawSuggestion.startsWith(codeBeforeCursor)) {
           suggestion = rawSuggestion.slice(codeBeforeCursor.length);
-          logger.info(`Trimmed suggestion: ${suggestion.substring(0, 200)}${suggestion.length > 200 ? '...' : ''}`);
+          logger.info(
+            `Trimmed suggestion: ${suggestion.substring(0, 200)}${suggestion.length > 200 ? '...' : ''}`
+          );
         } else {
           logger.warn(`Response doesn't start with expected prefix: "${codeBeforeCursor}"`);
           logger.warn(`Response starts with: "${rawSuggestion.substring(0, 50)}"`);
@@ -457,27 +517,31 @@ class LocalMCPHub {
           res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*'
+            Connection: 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
           });
 
           const id = `cmpl-${Date.now()}`;
           const created = Math.floor(Date.now() / 1000);
-          
+
           // Send the suggestion as a single chunk
           const streamChunk = {
             id,
             object: 'text_completion',
             created,
             model: this.config.ollama.model,
-            choices: [{
-              text: suggestion,
-              index: 0,
-              finish_reason: 'stop'
-            }]
+            choices: [
+              {
+                text: suggestion,
+                index: 0,
+                finish_reason: 'stop',
+              },
+            ],
           };
-          
-          logger.info(`Sending to VS Code: ${suggestion.substring(0, 200)}${suggestion.length > 200 ? '...' : ''}`);
+
+          logger.info(
+            `Sending to VS Code: ${suggestion.substring(0, 200)}${suggestion.length > 200 ? '...' : ''}`
+          );
           res.write(`data: ${JSON.stringify(streamChunk)}\n\n`);
           res.write('data: [DONE]\n\n');
           res.end();
@@ -488,16 +552,17 @@ class LocalMCPHub {
             object: 'text_completion',
             created: Math.floor(Date.now() / 1000),
             model: this.config.ollama.model,
-            choices: [{
-              text: suggestion,
-              index: 0,
-              finish_reason: 'stop'
-            }]
+            choices: [
+              {
+                text: suggestion,
+                index: 0,
+                finish_reason: 'stop',
+              },
+            ],
           };
-          
+
           res.json(responseObj);
         }
-        
       } catch (error) {
         logger.error('Error in completion:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -514,14 +579,16 @@ class LocalMCPHub {
     this.app.get('/v1/models', (req, res) => {
       res.json({
         object: 'list',
-        data: [{
-          id: this.config.ollama.model,
-          object: 'model',
-          created: Math.floor(Date.now() / 1000),
-          owned_by: 'local-mcp-hub',
-          capabilities: ['tool_use', 'function_calling'],
-          supports_tools: true
-        }]
+        data: [
+          {
+            id: this.config.ollama.model,
+            object: 'model',
+            created: Math.floor(Date.now() / 1000),
+            owned_by: 'local-mcp-hub',
+            capabilities: ['tool_use', 'function_calling'],
+            supports_tools: true,
+          },
+        ],
       });
     });
 
@@ -530,32 +597,25 @@ class LocalMCPHub {
       try {
         this.prompts = this.loadPrompts();
         logger.info('Prompts configuration reloaded successfully');
-        res.json({ 
-          success: true, 
+        res.json({
+          success: true,
           message: 'Prompts configuration reloaded successfully',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
         });
       } catch (error) {
         logger.error('Failed to reload prompts configuration:', error);
-        res.status(500).json({ 
-          success: false, 
+        res.status(500).json({
+          success: false,
           error: 'Failed to reload prompts configuration',
-          message: error instanceof Error ? error.message : 'Unknown error'
+          message: error instanceof Error ? error.message : 'Unknown error',
         });
       }
     });
   }
 
-
-
-
-
-
-
-
   public start(): void {
     const port = process.env.PORT ? parseInt(process.env.PORT) : this.config.hub.port;
-    
+
     // Set up graceful shutdown handlers
     process.on('SIGTERM', () => {
       logger.info('Received SIGTERM, shutting down gracefully...');
@@ -569,47 +629,43 @@ class LocalMCPHub {
       process.exit(0);
     });
 
-    process.on('uncaughtException', (error) => {
+    process.on('uncaughtException', error => {
       logger.error('Uncaught exception:', error);
       this.mcpManager.cleanup();
       process.exit(1);
     });
-    
+
     this.app.listen(port, async () => {
       logger.info(`Local MCP Hub started on port ${port}`);
       logger.info(`OpenAI-compatible API available at http://localhost:${port}/v1`);
       logger.info(`Health check: http://localhost:${port}/health`);
       logger.info(`Connected to Ollama at: ${this.config.ollama.host}`);
-      
+
       // Test Ollama connection on startup
       this.ollamaClient.testConnection(this.prompts);
-      
+
       // Initialize MCP tool schemas and keep processes alive
       await this.mcpManager.initializeMCPSchemas();
     });
   }
 
-
-
-
-
-
   private async enhancePromptWithTools(prompt: string): Promise<string> {
     // Simple heuristic to determine if we should use tools
-    const needsCodeAnalysis = prompt.toLowerCase().includes('class') || 
-                             prompt.toLowerCase().includes('method') || 
-                             prompt.toLowerCase().includes('function') ||
-                             prompt.toLowerCase().includes('code') ||
-                             prompt.toLowerCase().includes('file');
+    const needsCodeAnalysis =
+      prompt.toLowerCase().includes('class') ||
+      prompt.toLowerCase().includes('method') ||
+      prompt.toLowerCase().includes('function') ||
+      prompt.toLowerCase().includes('code') ||
+      prompt.toLowerCase().includes('file');
 
     if (needsCodeAnalysis) {
       try {
         // For now, use simple file reading instead of full MCP protocol
         logger.info('Attempting to provide code context...');
-        
+
         const srcPath = path.join(__dirname, '..', 'src');
         const hubFilePath = path.join(srcPath, 'hub.ts');
-        
+
         // Read the main hub file if it exists
         if (fs.existsSync(hubFilePath)) {
           const hubContent = fs.readFileSync(hubFilePath, 'utf-8');
@@ -623,10 +679,10 @@ Local codebase analysis:
 Hub.ts content (first 1000 chars):
 ${hubContent.substring(0, 1000)}...
 `;
-          
+
           return `${prompt}\n\n${codeContext}`;
         }
-        
+
         return prompt;
       } catch (error) {
         logger.warn('Failed to get code context, continuing without tools:', error);
@@ -636,16 +692,6 @@ ${hubContent.substring(0, 1000)}...
 
     return prompt;
   }
-
-
-
-
-
-
-
-
-
-
 }
 
 // Start the hub

@@ -45,22 +45,24 @@ export class MCPManager {
   }
 
   getOpenAITools(): OpenAITool[] {
-    this.logger.debug(`DEBUG: Getting OpenAI tools, schemasInitialized=${this.schemasInitialized}, schemas.size=${this.mcpToolSchemas.size}`);
-    
+    this.logger.debug(
+      `DEBUG: Getting OpenAI tools, schemasInitialized=${this.schemasInitialized}, schemas.size=${this.mcpToolSchemas.size}`
+    );
+
     if (this.schemasInitialized && this.mcpToolSchemas.size > 0) {
       const tools = Array.from(this.mcpToolSchemas.values());
       this.logger.debug(`DEBUG: Returning ${tools.length} tools`);
       this.logger.debug(`DEBUG: Tool names: ${tools.map(t => t.function.name).join(', ')}`);
       return tools;
     }
-    
+
     this.logger.warn('MCP schemas not initialized yet, returning empty tools list');
     return [];
   }
 
   async initializeMCPSchemas(): Promise<void> {
     this.logger.info('Initializing MCP tool schemas...');
-    
+
     for (const mcpName of this.config.enabled) {
       try {
         const schemas = await this.getMCPToolSchemas(mcpName);
@@ -72,7 +74,7 @@ export class MCPManager {
         this.logger.error(`Failed to load schemas from ${mcpName}:`, error);
       }
     }
-    
+
     this.schemasInitialized = true;
     this.logger.info(`Total MCP tools loaded: ${this.mcpToolSchemas.size}`);
   }
@@ -89,11 +91,16 @@ export class MCPManager {
         mcpCommand = path.join(__dirname, '..', 'mcps', 'serena', '.venv', 'bin', 'python');
         mcpArgs = [
           path.join(__dirname, '..', 'mcps', 'serena', 'scripts', 'mcp_server.py'),
-          '--context', 'ide-assistant',
-          '--project', path.join(__dirname, '..'),
-          '--transport', 'stdio',
-          '--tool-timeout', '30',
-          '--log-level', 'WARNING'
+          '--context',
+          'ide-assistant',
+          '--project',
+          path.join(__dirname, '..'),
+          '--transport',
+          'stdio',
+          '--tool-timeout',
+          '30',
+          '--log-level',
+          'WARNING',
         ];
       } else {
         reject(new Error(`Unknown MCP server: ${mcpName}`));
@@ -102,7 +109,7 @@ export class MCPManager {
 
       const mcpProcess = spawn(mcpCommand, mcpArgs, {
         stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: path.join(__dirname, '..')
+        cwd: path.join(__dirname, '..'),
       });
 
       // Store process in pool immediately
@@ -117,32 +124,32 @@ export class MCPManager {
         responseBuffer += data;
         const lines = responseBuffer.split('\n');
         responseBuffer = lines.pop() || '';
-        
+
         for (const line of lines) {
           if (line.trim()) {
             try {
               const response = JSON.parse(line);
-              
+
               if (response.id === 1 && !initialized) {
                 initialized = true;
                 this.logger.debug(`${mcpName} MCP server initialized`);
-                
+
                 // Send initialized notification to complete handshake
                 const initializedNotification = JSON.stringify({
                   jsonrpc: '2.0',
                   method: 'notifications/initialized',
-                  params: {}
+                  params: {},
                 });
                 mcpProcess.stdin?.write(initializedNotification + '\n');
                 this.logger.debug(`${mcpName} sent initialized notification`);
-                
+
                 // Follow proper MCP protocol: send tools/list after initialization
                 if (mcpName !== 'serena') {
                   const toolsRequest = JSON.stringify({
                     jsonrpc: '2.0',
                     id: 2,
                     method: 'tools/list',
-                    params: {}
+                    params: {},
                   });
                   mcpProcess.stdin?.write(toolsRequest + '\n');
                   this.logger.debug(`${mcpName} sent tools/list request`);
@@ -159,12 +166,12 @@ export class MCPManager {
                       parameters: tool.inputSchema || {
                         type: 'object',
                         properties: {},
-                        required: []
-                      }
-                    }
+                        required: [],
+                      },
+                    },
                   });
                 }
-                
+
                 // Mark process as ready for tool calls
                 this.mcpProcessReady.set(mcpName, true);
                 this.logger.info(`${mcpName} process initialized and ready for tool calls`);
@@ -178,28 +185,32 @@ export class MCPManager {
         }
       };
 
-      mcpProcess.stdout?.on('data', (data) => {
+      mcpProcess.stdout?.on('data', data => {
         handleResponse(data.toString());
       });
 
-      mcpProcess.stderr?.on('data', (data) => {
+      mcpProcess.stderr?.on('data', data => {
         const stderr = data.toString();
         this.logger.debug(`${mcpName} stderr:`, stderr.trim());
-        
+
         // For Serena, wait for language server to be ready before sending tools/list
-        if (mcpName === 'serena' && stderr.includes('Language server initialization completed') && initialized) {
+        if (
+          mcpName === 'serena' &&
+          stderr.includes('Language server initialization completed') &&
+          initialized
+        ) {
           this.logger.info(`${mcpName} language server ready, sending tools/list`);
           const toolsRequest = JSON.stringify({
             jsonrpc: '2.0',
             id: 2,
             method: 'tools/list',
-            params: {}
+            params: {},
           });
           mcpProcess.stdin?.write(toolsRequest + '\n');
         }
       });
 
-      mcpProcess.on('close', (code) => {
+      mcpProcess.on('close', code => {
         this.logger.warn(`${mcpName} process closed with code ${code}`);
         this.mcpProcesses.delete(mcpName);
         this.mcpProcessReady.delete(mcpName);
@@ -208,7 +219,7 @@ export class MCPManager {
         }
       });
 
-      mcpProcess.on('error', (error) => {
+      mcpProcess.on('error', error => {
         this.logger.error(`${mcpName} process error:`, error);
         this.mcpProcesses.delete(mcpName);
         this.mcpProcessReady.delete(mcpName);
@@ -223,8 +234,8 @@ export class MCPManager {
         params: {
           protocolVersion: '2025-06-18',
           capabilities: { tools: {} },
-          clientInfo: { name: 'local-mcp-hub', version: '1.0.0' }
-        }
+          clientInfo: { name: 'local-mcp-hub', version: '1.0.0' },
+        },
       });
 
       mcpProcess.stdin?.write(initRequest + '\n');
@@ -244,7 +255,7 @@ export class MCPManager {
 
   async callMCPTool(toolName: string, args: any = {}): Promise<string> {
     const startTime = Date.now();
-    
+
     // Determine which MCP server to use based on tool name
     let mcpName: string;
     if (toolName.includes('resolve-library-id') || toolName.includes('get-library-docs')) {
@@ -268,36 +279,45 @@ export class MCPManager {
       const handleResponse = (data: string) => {
         responseBuffer += data;
         const lines = responseBuffer.split('\n');
-        
+
         // Keep the last incomplete line in buffer
         responseBuffer = lines.pop() || '';
-        
+
         for (const line of lines) {
           if (line.trim()) {
             try {
               const response = JSON.parse(line);
-              
+
               // Look for our tool call response
               if (response.id === toolCallId) {
                 const duration = Date.now() - startTime;
-                this.logger.info(`Timing: MCP tool call: ${toolName} completed`, { duration: `${duration}ms` });
-                
+                this.logger.info(`Timing: MCP tool call: ${toolName} completed`, {
+                  duration: `${duration}ms`,
+                });
+
                 if (response.result) {
                   // Extract the actual result data from MCP response structure
                   let resultData = 'Tool executed successfully';
-                  
-                  if (response.result.structuredContent && response.result.structuredContent.result) {
+
+                  if (
+                    response.result.structuredContent &&
+                    response.result.structuredContent.result
+                  ) {
                     resultData = response.result.structuredContent.result;
                   } else if (response.result.content && response.result.content.length > 0) {
-                    resultData = response.result.content[0].text || JSON.stringify(response.result.content);
+                    resultData =
+                      response.result.content[0].text || JSON.stringify(response.result.content);
                   } else {
                     resultData = JSON.stringify(response.result);
                   }
-                  
-                  this.logger.debug(`MCP ${mcpName}: ${toolName} succeeded`, { resultLength: resultData.length });
-                  this.logger.debug(`TOOL RESULT DEBUG: ${toolName}`, { 
+
+                  this.logger.debug(`MCP ${mcpName}: ${toolName} succeeded`, {
+                    resultLength: resultData.length,
+                  });
+                  this.logger.debug(`TOOL RESULT DEBUG: ${toolName}`, {
                     fullResult: resultData,
-                    resultPreview: resultData.substring(0, 200) + (resultData.length > 200 ? '...' : '')
+                    resultPreview:
+                      resultData.substring(0, 200) + (resultData.length > 200 ? '...' : ''),
                   });
                   cleanup();
                   resolve(resultData);
@@ -339,12 +359,12 @@ export class MCPManager {
         method: 'tools/call',
         params: {
           name: toolName,
-          arguments: args
-        }
+          arguments: args,
+        },
       });
 
       this.logger.debug(`MCP ${mcpName}: ${toolName}`, { params: args });
-      
+
       try {
         process.stdin?.write(toolCallRequest + '\n');
       } catch (error) {
