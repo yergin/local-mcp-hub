@@ -153,16 +153,16 @@ This document analyzes the actual API calls and flow recorded in `.tmp/local-mcp
 
 The hub creates messages with the tool result and sends to the full model to determine if more tools are needed:
 
-#### Messages Sent to Full Model
+#### Messages Sent to Full Model (Structured Format)
 ```json
 [
   {
     "role": "system",
-    "content": "<important_rules>..."
+    "content": "<important_rules>\n  You are in agent mode.\n\n  Always include the language and file name in the info string when you write code blocks.\n  If you are editing \"src/main.py\" for example, your code block should start with '```python src/main.py'\n\n</important_rules>"
   },
   {
-    "role": "user", 
-    "content": "Analyze the architecture of this codebase..."
+    "role": "user",
+    "content": "Analyze the architecture of this codebase. I want to understand how the different modules interact, what the main data flows are, and how requests are processed from start to finish."
   },
   {
     "role": "assistant",
@@ -175,6 +175,18 @@ The hub creates messages with the tool result and sends to the full model to det
   }
 ]
 ```
+
+#### Actual Ollama HTTP Request
+```json
+{
+  "model": "qwen2.5:latest",
+  "options": {
+    "num_predict": 4000,
+    "temperature": 0.7
+  },
+  "prompt": "system: You are an AI assistant. You are a skilled developer with deep knowledge of programming languages, frameworks, and development best practices. If including code snippets, always start code blocks with the programming language and file name (e.g., ```{language} path/to/file).\n\nuser: Analyze the architecture of this codebase. I want to understand how the different modules interact, what the main data flows are, and how requests are processed from start to finish.\n\nassistant: I'll use the find_file tool to help answer your question.\n\nTool Results:\nResult 1: {\"files\": [\".prettierignore\", \".prettierrc\", \".gitignore\"]}\n\nTool Results:\n{toolResults}\nBased on the tool results above, you have two options:\n\n1. If you have enough information to provide a complete answer, respond directly to the user.\n\n2. If you need additional information to provide better assistance, create a plan in JSON format:\n\n{\n  \"main_objective\": \"Brief description of the overall goal\",\n  \"next_step\": {\n    \"purpose\": \"What this step will accomplish\",\n    \"tool\": \"tool_name\",\n    \"prompt\": \"Clear instruction for the tool\"\n  },\n  \"future_steps\": [\n    \"Next step description\",\n    \"Final step description\"\n  ]\n}\n\nFor plan iteration (if this is a follow-up step), also include:\n\"current_step_conclusion\": \"Summary of what was learned from this step\"",
+  "stream": false
+}
 
 #### Full Model Response
 The model recognizes that the initial tool result is insufficient and creates a plan:
@@ -421,3 +433,208 @@ data: [DONE]
 4. **Tool Result Processing**: Some tools returned minimal data that wasn't useful for the objective.
 
 This analysis demonstrates the system is working as designed according to PLAN.md, successfully implementing multi-step reasoning with MCP tool integration, though with room for optimization in planning efficiency and tool utilization.
+
+# Notes:
+
+## Fast model initially chose bad arguments
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1753223721245,
+  "method": "tools/call",
+  "params": {
+    "name": "find_file",
+    "arguments": {
+      "file_mask": ".*",
+      "relative_path": "."
+    }
+  }
+}
+```
+
+This is will be a recurring problem if not fixed.
+
+### Actions: ###
+
+1. Include top-level non-gitignored files as part of the initial prompts using `list_dir`.
+2. Change the tool selection error to be "... does not exists" rather than "... is not available".
+
+## Initial message sent to full model
+
+This should not include Continue's system prompt as the hub is acting as the agent and it the one generating the prompts and context.
+
+The full model may not realise that the tool results may not be right due to bad arguments. I think it's important to include the prompt and arguments here.
+
+The prompt is a bit confusing regarding "future_steps": first in the list is "Next step description" which is wrong. it's supposed to start with the step after the "next step". Perhaps the key should be called "later_steps" rather than "future_steps".
+
+### Actions: ###
+
+1. Put tool args, prompt and results in the assistant role block (The same `{tool, prompt, args, results} Assistant Tool Result Type` structure will be useful for reporting later assistant calls too):
+
+  ```
+  [
+    ...
+    {
+      "role": "assistant",
+      "content": {
+        "tool": "...",
+        "prompt": "...",
+        "args": "...",
+        "results": ..."
+      }
+    }
+  ]
+  ```
+
+2. Rename the "toolResultsNonStreaming" prompt variable to "planDecision".
+3. Rename "future_steps" to "later_steps" and fix the prompt example.
+4. Replace current_step_conclusion from the initial prompt to conclusion_from_assistant_data and assistant_data_was_helpful (true/false).
+
+### Ollama Request for Next Plan Iteration
+
+The prompt says "completed steps" and lists "Identify the main entry points for requests in the application". Even though the iteration completed, the objective of the step was not yet reached. I think there is a subtle confusion between "step" and "iteration". I think the prompt should tell the model what the current step is and ask the model to flag the current step as complete or not in each iteration. If the model flags it as complete, we include add it to an internal list of completed steps and provide this list in the next iteration prompt, along with its conclusion and all tool results.
+
+There are actually 3 branching possibilities at this point:
+
+1. The model decided to conclude the chat -> its response doesn't include a plan iteration JSON block.
+
+2. The model has not yet completed the current step and needs to run more tools -> it returns notes to its future self, tool and prompt details in the JSON:
+
+  ```
+  {
+    ...
+    "current_step": {
+      "notes_to_future_self": "...",
+      "tool": "...",
+      "prompt": "..."
+    },
+    ...
+    /* it's free to redefine these at any point but is completely optional */
+    "later_steps": [
+      "...",
+      "..."
+    ]
+  }
+  ```
+
+3. The model has completed the current step either successfully or unsuccessfully -> it returns he follow in the JSON:
+
+  ```
+  {
+    ...
+    "current_step": {
+      "completed": true,
+      "success": false,
+      "notes_to_future_self": "..."
+    },
+    "next_step": {
+      "objective": "...",
+      "tool": "...",
+      "prompt": "..."
+    }
+
+    /* it's free to redefine these at any point but is completely optional */
+    "later_steps": [
+      "...",
+      "..."
+    ]
+    ...
+  }
+  ```
+
+Now, the model's prompt request in each iteration needs to include the above info for previous steps, its current step and its later steps:
+
+  ```
+  {
+    "user_prompt": "..."
+    "main_objective": "..."
+    "completed_steps": [
+      {
+        "objective": "assistant to help gather initial information",
+        "success": false,  /* assistant_data_was helpful */
+        "conclusion": "..." /* conclusion_from_assistant_data */
+      }
+      ...
+      {
+        "objective": "..."
+        "success": false,
+        "conclusion": "..."
+      }
+    ],
+    "current_step": {
+      "objective": "..."
+      "completed": false,
+      "notes": "...", /* notes_to_future_self */
+      "assistant": {
+        "tool": "...",
+        "prompt": "...",
+        "args": "..."
+        "results": ..."
+      }
+    },
+    "next_steps": [
+      "...",
+      "..."
+    ]
+  }
+  ```
+
+Note that tools results are not stored for completed_steps, it is up to the model to leave sufficient detail in its "notes_to_future_self" to be able to make use of this data in future iterations. The prompt will need to make this clear.
+
+The prompt also needs to make it clear that the model decide to complete the chat, iterate on the current step or go to the next step.
+
+### Actions: ###
+
+1. Declare the various JSON structures as types for use in functions:
+
+  ```
+  Current Step Iteration Response Type:
+  {
+    "notes_to_future_self": "...",
+    "tool": "...",
+    "prompt": "..."
+  },
+
+  Current Step Complete Response Type:
+  {
+    "completed": true,
+    "success": false,
+    "notes_to_future_self": "..."
+  },
+
+  Next Step Response Type (note that this is also used in the initial planning response):
+  {
+    "objective": "...",
+    "tool": "...",
+    "prompt": "..."
+  }
+
+  Completed Step Request Type
+  {
+    "objective": "..."
+    "success": false,
+    "conclusion": "..."
+  }
+
+  Current Step Request Type
+  {
+    "objective": "..."
+    "completed": false,
+    "notes": "...", /* notes_to_future_self */
+    "assistant": {
+      /* Assistant Tool Result Type */
+    },
+  }
+  ```
+
+2. Implement these types as well as the complete_steps array to keep as part of the state and review the prompts.
+
+## Final conclusion due to iteration limit
+
+The model was not given an opportunity to provide a final conclusion on the last iteration.
+
+### Actions: ###
+
+1. Create a prompt for the final iteration which provides the same information as previous iterations except that it does not mention "later_steps" and is asked to provide a final conclusion.
+ 
