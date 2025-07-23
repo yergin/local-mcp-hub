@@ -7,6 +7,51 @@ export interface FIMRequest {
   isFIM: boolean;
 }
 
+// Assistant Tool Result Type - for tracking tool execution with context
+export interface AssistantToolResult {
+  tool: string;
+  prompt: string;
+  args: any;
+  results: string;
+}
+
+// Current Step Iteration Response Type - when model continues working on current step
+export interface CurrentStepIterationResponse {
+  notes_to_future_self: string;
+  tool: string;
+  prompt: string;
+}
+
+// Current Step Complete Response Type - when model completes current step
+export interface CurrentStepCompleteResponse {
+  completed: true;
+  success: boolean;
+  notes_to_future_self: string;
+}
+
+// Next Step Response Type - for defining new steps (used in initial planning and step transitions)
+export interface NextStepResponse {
+  objective: string;
+  tool: string;
+  prompt: string;
+}
+
+// Completed Step Request Type - for tracking completed steps in prompts
+export interface CompletedStepRequest {
+  objective: string;
+  success: boolean;
+  conclusion: string;
+}
+
+// Current Step Request Type - for providing current step context in prompts
+export interface CurrentStepRequest {
+  objective: string;
+  completed: boolean;
+  notes: string; // notes_to_future_self
+  assistant: AssistantToolResult;
+}
+
+// Legacy interfaces - to be phased out
 export interface PlanStep {
   purpose: string;
   tool: string;
@@ -30,7 +75,7 @@ export interface PlanExecutionState {
 
 export interface ResponseGenerationConfig {
   toolResultsStreaming?: { template?: string };
-  toolResultsNonStreaming?: { template?: string };
+  planDecision?: { template?: string }; // renamed from toolResultsNonStreaming
   planIteration?: { template?: string };
 }
 
@@ -65,40 +110,38 @@ export class RequestProcessor {
   convertMessagesToPrompt(messages: any[]): string {
     // Check if we should override the system prompt
     const customSystem = this.systemConfig.customSystemPrompt;
+    let modifiedMessages = messages;
+    
     if (customSystem?.enabled && customSystem.template) {
       // Replace system message with custom one
-      const modifiedMessages = messages.map(msg => {
+      modifiedMessages = messages.map(msg => {
         if (msg.role === 'system') {
           this.logger.info('Overriding Continue system prompt with custom prompt from prompts.json');
           return { ...msg, content: customSystem.template };
         }
         return msg;
       });
-      
-      const prompt = modifiedMessages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
-      
-      // Debug logging: Prompt conversion with override
-      this.logger.debug('PROMPT CONVERSION (WITH CUSTOM SYSTEM)', {
-        messageCount: modifiedMessages.length,
-        messages: modifiedMessages,
-        originalSystemPrompt: messages.find(m => m.role === 'system')?.content?.substring(0, 200),
-        customSystemPrompt: customSystem.template.substring(0, 200),
-        finalPrompt: prompt.substring(0, 500),
-        promptLength: prompt.length
-      });
-      
-      return prompt;
     }
     
-    // Use original messages if custom system prompt is disabled
-    const prompt = messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
+    // Convert messages to prompt, handling both old and new assistant message formats
+    const prompt = modifiedMessages.map(msg => {
+      if (msg.role === 'assistant' && typeof msg.content === 'object' && msg.content.tool) {
+        // New Assistant Tool Result Type format
+        const assistantResult = msg.content as AssistantToolResult;
+        return `assistant: Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${JSON.stringify(assistantResult.args)}. Result: ${assistantResult.results}`;
+      } else {
+        // Standard message format
+        return `${msg.role}: ${msg.content}`;
+      }
+    }).join('\n\n');
     
     // Debug logging: Prompt conversion
     this.logger.debug('PROMPT CONVERSION', {
-      messageCount: messages.length,
-      messages: messages,
-      finalPrompt: prompt,
-      promptLength: prompt.length
+      messageCount: modifiedMessages.length,
+      messages: modifiedMessages,
+      finalPrompt: prompt.substring(0, 500) + (prompt.length > 500 ? '...' : ''),
+      promptLength: prompt.length,
+      hasCustomSystem: customSystem?.enabled || false
     });
     
     return prompt;
@@ -218,26 +261,15 @@ export class RequestProcessor {
     temperature: number,
     maxTokens: number
   ): Promise<string> {
-    // Find the tool results in the messages
-    const toolResults = messages.filter(msg => msg.role === 'tool');
-    const userMessages = messages.filter(msg => msg.role !== 'tool');
-
-    // Create a prompt that includes the tool results
-    let prompt = this.convertMessagesToPrompt(userMessages);
-
-    if (toolResults.length > 0) {
-      prompt += '\n\nTool Results:\n';
-      toolResults.forEach((result, index) => {
-        prompt += `Result ${index + 1}: ${result.content}\n`;
-      });
-      prompt += '\n' + this.responseConfig.toolResultsNonStreaming!.template!;
-    }
+    // Convert all messages to prompt (now includes embedded tool results in assistant messages)
+    let prompt = this.convertMessagesToPrompt(messages);
+    
+    // Add the plan decision template
+    prompt += '\n\n' + this.responseConfig.planDecision!.template!;
 
     // Debug logging: Final response generation prompt
-    this.logger.debug('TOOL RESULTS PROMPT (NON-STREAMING)', {
+    this.logger.debug('PLAN DECISION PROMPT (TOOL RESULTS)', {
       originalMessageCount: messages.length,
-      toolResultsCount: toolResults.length,
-      userMessagesCount: userMessages.length,
       finalPrompt: prompt,
       promptLength: prompt.length,
       temperature: temperature,

@@ -487,7 +487,7 @@ The prompt is a bit confusing regarding "future_steps": first in the list is "Ne
   ]
   ```
 
-2. Rename the "toolResultsNonStreaming" prompt variable to "planDecision".
+2. ~~Rename the "toolResultsNonStreaming" prompt variable to "planDecision".~~
 3. Rename "future_steps" to "later_steps" and fix the prompt example.
 4. Replace current_step_conclusion from the initial prompt to conclusion_from_assistant_data and assistant_data_was_helpful (true/false).
 
@@ -586,7 +586,7 @@ The prompt also needs to make it clear that the model decide to complete the cha
 
 ### Actions: ###
 
-1. Declare the various JSON structures as types for use in functions:
+1. ~~Declare the various JSON structures as types for use in functions:~~
 
   ```
   Current Step Iteration Response Type:
@@ -637,4 +637,3 @@ The model was not given an opportunity to provide a final conclusion on the last
 ### Actions: ###
 
 1. Create a prompt for the final iteration which provides the same information as previous iterations except that it does not mention "later_steps" and is asked to provide a final conclusion.
- 

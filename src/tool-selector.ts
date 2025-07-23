@@ -103,7 +103,8 @@ export class ToolSelector {
 
   async selectToolWithLLM(
     messages: any[],
-    tools: OpenAITool[]
+    tools: OpenAITool[],
+    directoryContext?: string
   ): Promise<ToolSelectionResult | null> {
     const startTime = Date.now();
     const lastMessage = messages[messages.length - 1];
@@ -134,6 +135,7 @@ export class ToolSelector {
     const toolSelectionTemplate = this.toolSelectionConfig.stage1.template;
     const toolSelectionPrompt = toolSelectionTemplate
       .replace('{userRequest}', userRequest)
+      .replace('{directoryContext}', directoryContext || 'Directory context not available')
       .replace('{toolNames}', toolNames);
 
     this.logger.debug(`DEBUG: Stage 1 prompt length: ${toolSelectionPrompt.length} chars`);

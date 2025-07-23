@@ -45,7 +45,7 @@ interface PromptsConfig {
   };
   responseGeneration?: {
     toolResultsStreaming?: { template?: string };
-    toolResultsNonStreaming?: { template?: string };
+    planDecision?: { template?: string };
     planIteration?: { template?: string };
   };
   systemMessages?: {
@@ -379,8 +379,25 @@ class LocalMCPHub {
           tools: mcpTools.map((t: OpenAITool) => t.function.name),
         });
 
+        // Get directory context for better tool selection and planning
+        let directoryContext = '';
+        try {
+          const dirContextStartTime = Date.now();
+          directoryContext = await this.mcpManager.callMCPTool('list_dir', { relative_path: '.', recursive: false });
+          logTiming('Directory context gathering', dirContextStartTime);
+          logger.debug('Directory context gathered', {
+            contextLength: directoryContext.length,
+            contextPreview: directoryContext.substring(0, 200) + '...'
+          });
+        } catch (dirError) {
+          logger.warn('Failed to gather directory context for tool selection', {
+            error: dirError instanceof Error ? dirError.message : 'Unknown error'
+          });
+          directoryContext = 'Directory context unavailable';
+        }
+
         const selectionStartTime = Date.now();
-        const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools);
+        const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools, directoryContext);
         logTiming('Tool selection', selectionStartTime);
         logger.info('Tool selected', {
           tool: toolSelection?.tool,
@@ -404,18 +421,27 @@ class LocalMCPHub {
                 logTiming(`Tool execution: ${toolSelection.tool}`, toolExecStartTime);
                 logger.info('Tool executed successfully', { resultLength: toolResult.length });
 
-                // Create messages with tool result for decision making
+                // Create messages with tool result for decision making using new Assistant Tool Result Type
                 const messagesWithTool = [
                   ...messages,
                   {
                     role: 'assistant',
-                    content: `I'll use the ${toolSelection.tool} tool to help answer your question.`,
+                    content: {
+                      tool: 'list_dir',
+                      prompt: 'Provide directory context for better planning',
+                      args: { relative_path: '.', recursive: false },
+                      results: directoryContext
+                    }
                   },
                   {
-                    role: 'tool',
-                    content: toolResult,
-                    name: toolSelection.tool,
-                  },
+                    role: 'assistant',
+                    content: {
+                      tool: toolSelection.tool,
+                      prompt: `Use ${toolSelection.tool} to help analyze the request`,
+                      args: toolSelection.args,
+                      results: toolResult
+                    }
+                  }
                 ];
 
                 const finalResponseStartTime = Date.now();
@@ -844,7 +870,7 @@ class LocalMCPHub {
           });
           
           // Treat tool not found as a step result and continue with plan iteration
-          toolResult = `Error: Tool "${currentPlan.next_step!.tool}" is not available. Available tools: ${mcpTools.map(t => t.function.name).join(', ')}`;
+          toolResult = `Error: Tool "${currentPlan.next_step!.tool}" does not exist. Available tools: ${mcpTools.map(t => t.function.name).join(', ')}`;
           
           logger.debug('PLAN STEP ERROR TREATED AS RESULT', {
             errorResult: toolResult
