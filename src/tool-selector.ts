@@ -97,7 +97,7 @@ export class ToolSelector {
     return this.toolGuidance.readOnlyTools?.includes(toolName) || false;
   }
 
-  private isSimpleArgumentGeneration(toolName: string): boolean {
+  isSimpleArgumentGeneration(toolName: string): boolean {
     return this.toolGuidance.fastModelTools?.includes(toolName) || false;
   }
 
@@ -217,7 +217,7 @@ export class ToolSelector {
     }
   }
 
-  private async generateArgsWithFastModel(
+  async generateArgsWithFastModel(
     userRequest: string,
     toolSchema: OpenAITool
   ): Promise<any> {
@@ -262,7 +262,7 @@ export class ToolSelector {
     return parsedArgs;
   }
 
-  private async generateArgsWithFullModel(
+  async generateArgsWithFullModel(
     userRequest: string,
     toolSchema: OpenAITool
   ): Promise<any> {

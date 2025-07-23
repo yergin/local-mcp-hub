@@ -7,9 +7,31 @@ export interface FIMRequest {
   isFIM: boolean;
 }
 
+export interface PlanStep {
+  purpose: string;
+  tool: string;
+  prompt: string;
+}
+
+export interface PlanResponse {
+  main_objective: string;
+  current_step_conclusion?: string;
+  next_step?: PlanStep;
+  future_steps: string[];
+}
+
+export interface PlanExecutionState {
+  objective: string;
+  completedSteps: string[];
+  currentStep?: PlanStep;
+  futureSteps: string[];
+  stepResults: string[];
+}
+
 export interface ResponseGenerationConfig {
   toolResultsStreaming?: { template?: string };
   toolResultsNonStreaming?: { template?: string };
+  planIteration?: { template?: string };
 }
 
 export interface SystemMessageConfig {
@@ -274,5 +296,325 @@ export class RequestProcessor {
   private estimateTokens(text: string): number {
     // Simple token estimation (roughly 4 characters per token)
     return Math.ceil(text.length / 4);
+  }
+
+  isPlanResponse(response: string): boolean {
+    this.logger.debug('PLAN DETECTION ATTEMPT', {
+      responseLength: response.length,
+      responsePreview: response.substring(0, 200) + '...',
+      fullResponse: response
+    });
+
+    // Check if the response contains plan structure
+    try {
+      const parsed = JSON.parse(response.trim());
+      const isPlan = parsed && 
+             typeof parsed.main_objective === 'string' && 
+             Array.isArray(parsed.future_steps) &&
+             (parsed.next_step === undefined || 
+              (typeof parsed.next_step === 'object' && 
+               parsed.next_step.tool && 
+               parsed.next_step.prompt));
+
+      this.logger.debug('PLAN DETECTION (DIRECT JSON)', {
+        isPlan: isPlan,
+        hasMainObjective: typeof parsed?.main_objective === 'string',
+        hasFutureSteps: Array.isArray(parsed?.future_steps),
+        hasValidNextStep: parsed.next_step === undefined || 
+          (typeof parsed.next_step === 'object' && parsed.next_step.tool && parsed.next_step.prompt),
+        parsedStructure: parsed
+      });
+
+      return isPlan;
+    } catch (parseError) {
+      this.logger.debug('PLAN DETECTION (DIRECT JSON FAILED)', {
+        parseError: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+
+      // Try to find plan structure in text that might contain other content
+      const jsonMatch = response.match(/\{[\s\S]*"main_objective"[\s\S]*\}/);
+      if (jsonMatch) {
+        this.logger.debug('PLAN DETECTION (EXTRACTED JSON)', {
+          extractedJson: jsonMatch[0],
+          jsonLength: jsonMatch[0].length
+        });
+
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          const isPlan = parsed && 
+                 typeof parsed.main_objective === 'string' && 
+                 Array.isArray(parsed.future_steps);
+
+          this.logger.debug('PLAN DETECTION (EXTRACTED JSON RESULT)', {
+            isPlan: isPlan,
+            hasMainObjective: typeof parsed?.main_objective === 'string',
+            hasFutureSteps: Array.isArray(parsed?.future_steps),
+            parsedStructure: parsed
+          });
+
+          return isPlan;
+        } catch (extractParseError) {
+          this.logger.debug('PLAN DETECTION (EXTRACTED JSON FAILED)', {
+            extractParseError: extractParseError instanceof Error ? extractParseError.message : 'Unknown parse error'
+          });
+          return false;
+        }
+      }
+
+      this.logger.debug('PLAN DETECTION (NO JSON FOUND)', {
+        responseContainsMainObjective: response.includes('main_objective'),
+        responseContainsPlan: response.includes('plan')
+      });
+      return false;
+    }
+  }
+
+  extractPlanFromResponse(response: string): PlanResponse | null {
+    this.logger.debug('PLAN EXTRACTION ATTEMPT', {
+      responseLength: response.length,
+      responsePreview: response.substring(0, 200) + '...'
+    });
+
+    try {
+      const parsed = JSON.parse(response.trim());
+      if (this.isPlanResponse(response)) {
+        this.logger.debug('PLAN EXTRACTION SUCCESS (DIRECT JSON)', {
+          extractedPlan: parsed,
+          objective: parsed.main_objective,
+          stepsCount: parsed.future_steps?.length || 0,
+          hasNextStep: !!parsed.next_step
+        });
+        return parsed as PlanResponse;
+      }
+    } catch (parseError) {
+      this.logger.debug('PLAN EXTRACTION (DIRECT JSON FAILED)', {
+        parseError: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+
+      // Try to extract JSON from mixed content
+      const jsonMatch = response.match(/\{[\s\S]*"main_objective"[\s\S]*\}/);
+      if (jsonMatch) {
+        this.logger.debug('PLAN EXTRACTION (TRYING EXTRACTED JSON)', {
+          extractedJsonLength: jsonMatch[0].length,
+          extractedJson: jsonMatch[0]
+        });
+
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed && typeof parsed.main_objective === 'string') {
+            this.logger.debug('PLAN EXTRACTION SUCCESS (EXTRACTED JSON)', {
+              extractedPlan: parsed,
+              objective: parsed.main_objective,
+              stepsCount: parsed.future_steps?.length || 0,
+              hasNextStep: !!parsed.next_step
+            });
+            return parsed as PlanResponse;
+          }
+        } catch (extractParseError) {
+          this.logger.debug('PLAN EXTRACTION (EXTRACTED JSON FAILED)', {
+            extractParseError: extractParseError instanceof Error ? extractParseError.message : 'Unknown parse error'
+          });
+          return null;
+        }
+      }
+    }
+
+    this.logger.debug('PLAN EXTRACTION FAILED', {
+      reason: 'No valid plan structure found in response'
+    });
+    return null;
+  }
+
+  streamPlanResponse(res: any, plan: PlanResponse, model?: string): { id: string, created: number, responseModel: string } {
+    this.logger.info('Streaming plan response to Continue');
+    this.logger.debug('PLAN STREAMING DETAILS', {
+      plan: plan,
+      objective: plan.main_objective,
+      futureStepsCount: plan.future_steps?.length || 0,
+      hasNextStep: !!plan.next_step,
+      nextStepTool: plan.next_step?.tool,
+      nextStepPurpose: plan.next_step?.purpose,
+      model: model
+    });
+
+    // Set SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    });
+
+    const id = `chatcmpl-${Date.now()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const responseModel = model || 'default-model';
+
+    this.logger.debug('PLAN STREAMING SSE SETUP', {
+      streamId: id,
+      created: created,
+      responseModel: responseModel
+    });
+
+    // Stream plan introduction
+    const planIntro = `A plan has been created where the objective is: ${plan.main_objective}\n\n`;
+    this.logger.debug('PLAN STREAMING INTRO', {
+      content: planIntro,
+      length: planIntro.length
+    });
+    this.streamChunk(res, planIntro, id, created, responseModel);
+
+    // Stream plan steps
+    if (plan.future_steps && plan.future_steps.length > 0) {
+      plan.future_steps.forEach((step, index) => {
+        const stepText = `- ${step}\n`;
+        this.logger.debug('PLAN STREAMING STEP', {
+          stepIndex: index,
+          stepContent: stepText,
+          stepLength: stepText.length
+        });
+        this.streamChunk(res, stepText, id, created, responseModel);
+      });
+    }
+
+    // Stream current step if present
+    if (plan.next_step) {
+      const stepHeader = `\n${plan.next_step.purpose}\n${'-'.repeat(plan.next_step.purpose.length)}\n`;
+      this.logger.debug('PLAN STREAMING NEXT STEP HEADER', {
+        stepHeader: stepHeader,
+        headerLength: stepHeader.length,
+        nextStepDetails: plan.next_step
+      });
+      this.streamChunk(res, stepHeader, id, created, responseModel);
+    }
+
+    this.logger.debug('PLAN STREAMING COMPLETION', {
+      totalContentEstimate: planIntro.length + 100,
+      note: 'Stream kept open for plan execution'
+    });
+    // Don't finish the stream - keep it open for plan execution
+    // Return stream context for continued streaming
+    return { id, created, responseModel };
+  }
+
+  streamStepCompletion(res: any, stepResult: string, nextStep?: PlanStep, streamContext?: { id: string, created: number, responseModel: string }): void {
+    this.logger.debug('STEP COMPLETION STREAMING START', {
+      stepResult: stepResult,
+      stepResultLength: stepResult.length,
+      hasNextStep: !!nextStep,
+      nextStep: nextStep,
+      streamContext: streamContext
+    });
+
+    // Use existing stream context or create new one
+    const id = streamContext?.id || `chatcmpl-${Date.now()}`;
+    const created = streamContext?.created || Math.floor(Date.now() / 1000);
+    const responseModel = streamContext?.responseModel || 'default-model';
+
+    // Stream step completion
+    if (stepResult) {
+      const completionText = stepResult + '\n\n';
+      this.logger.debug('STEP COMPLETION STREAMING RESULT', {
+        completionText: completionText,
+        completionLength: completionText.length
+      });
+      this.streamChunk(res, completionText, id, created, responseModel);
+    }
+
+    // Stream next step if present
+    if (nextStep) {
+      const stepHeader = `${nextStep.purpose}\n${'-'.repeat(nextStep.purpose.length)}\n`;
+      this.logger.debug('STEP COMPLETION STREAMING NEXT STEP', {
+        stepHeader: stepHeader,
+        headerLength: stepHeader.length,
+        nextStepDetails: nextStep
+      });
+      this.streamChunk(res, stepHeader, id, created, responseModel);
+    }
+
+    this.logger.debug('STEP COMPLETION STREAMING END');
+  }
+
+  streamFinalConclusion(res: any, conclusion: string, streamContext?: { id: string, created: number, responseModel: string }): void {
+    this.logger.debug('FINAL CONCLUSION STREAMING START', {
+      conclusion: conclusion,
+      conclusionLength: conclusion.length,
+      streamContext: streamContext
+    });
+
+    const id = streamContext?.id || `chatcmpl-${Date.now()}`;
+    const created = streamContext?.created || Math.floor(Date.now() / 1000);
+    const responseModel = streamContext?.responseModel || 'default-model';
+
+    const header = `\nFinal conclusion reached\n${'='.repeat(25)}\n\n`;
+    this.logger.debug('FINAL CONCLUSION STREAMING HEADER', {
+      header: header,
+      headerLength: header.length
+    });
+    this.streamChunk(res, header, id, created, responseModel);
+
+    this.logger.debug('FINAL CONCLUSION STREAMING CONTENT', {
+      conclusion: conclusion,
+      conclusionLength: conclusion.length
+    });
+    this.streamChunk(res, conclusion, id, created, responseModel);
+
+    this.logger.debug('FINAL CONCLUSION STREAMING END', {
+      totalEstimate: conclusion.length + 50
+    });
+    this.finishStream(res, id, created, responseModel, conclusion.length + 50);
+  }
+
+  private streamChunk(res: any, content: string, id: string, created: number, model: string): void {
+    const words = content.split(' ');
+    
+    for (let i = 0; i < words.length; i++) {
+      const chunk = words[i] + (i < words.length - 1 ? ' ' : '');
+      
+      const streamChunk = {
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            delta: { content: chunk },
+            finish_reason: null,
+          },
+        ],
+      };
+
+      const chunkData = `data: ${JSON.stringify(streamChunk)}\n\n`;
+      res.write(chunkData);
+    }
+  }
+
+  private finishStream(res: any, id: string, created: number, model: string, tokenEstimate: number): void {
+    const finalChunk = {
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: 'stop',
+        },
+      ],
+      usage: {
+        prompt_tokens: tokenEstimate,
+        completion_tokens: Math.floor(tokenEstimate / 2),
+        total_tokens: Math.floor(tokenEstimate * 1.5),
+      },
+    };
+
+    const finalChunkData = `data: ${JSON.stringify(finalChunk)}\n\n`;
+    const doneData = 'data: [DONE]\n\n';
+
+    res.write(finalChunkData);
+    res.write(doneData);
+    res.end();
   }
 }
