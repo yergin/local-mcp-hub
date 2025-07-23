@@ -83,3 +83,38 @@ Now this is where the process changes:
     ```
 
     b. current_step_conclusion is streamed to the user along with any changes to the plan and the tool and its prompt sent to the fast or full model for argument generation. Go to step 8.
+
+## Issues Identified for Future Prompt Engineering Improvements
+
+### 1. Fast Model Argument Generation - Regex vs Glob Pattern Issue
+
+**Problem**: The fast model generates regex patterns instead of glob patterns for the `find_file` tool, causing it to only match hidden files.
+
+**Example**: 
+- Fast model generates: `{"args": {"file_mask": ".*", "relative_path": "."}}`
+- Should generate: `{"args": {"file_mask": "*", "relative_path": "."}}`
+
+**Impact**: The `find_file` tool with regex pattern ".*" only returns hidden files (`.prettierignore`, `.prettierrc`, `.gitignore`) instead of all files, leading to poor tool results.
+
+**Location**: `prompts.json` - `argumentGeneration.fastModel.template` needs better guidance to use glob patterns instead of regex patterns.
+
+### 2. Full Model Context Recognition Issue
+
+**Problem**: The full model fails to recognize project type despite having complete directory context showing clear TypeScript/Node.js indicators.
+
+**Evidence**: In the plan decision prompt, the full model received:
+```json
+{
+  "dirs": ["src", ".continue", ".serena"], 
+  "files": ["config.json", "install.sh", "OPTIMIZATION_RESULTS.md", "restart-hub.sh", "tsconfig.json", "API_CALLS.md", "LICENSE", "TIMING_ANALYSIS.md", "package-lock.json", ".prettierignore", ".prettierrc", "README.md", "continue-config.yaml", "PLAN.md", "install-mac.sh", "package.json", "install.bat", ".gitignore", "prompts.json"]
+}
+```
+
+**Clear indicators present**:
+- `tsconfig.json` (TypeScript project)
+- `package.json` (Node.js project)
+- `src` directory (source code)
+
+**Response**: Model still responded with `"assistant_data_was_helpful": false` and failed to identify the project as TypeScript/Node.js.
+
+**Location**: `prompts.json` - `responseGeneration.planDecision.template` may need better instructions for recognizing project types from directory listings.

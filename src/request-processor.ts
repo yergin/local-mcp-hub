@@ -11,22 +11,33 @@ export interface FIMRequest {
 export interface AssistantToolResult {
   tool: string;
   prompt: string;
-  args: any;
+  args: string; // JSON stringified arguments
   results: string;
 }
 
 // Current Step Iteration Response Type - when model continues working on current step
 export interface CurrentStepIterationResponse {
-  notes_to_future_self: string;
-  tool: string;
-  prompt: string;
+  current_step: {
+    notes_to_future_self: string;
+    tool: string;
+    prompt: string;
+  };
+  later_steps?: string[];
 }
 
 // Current Step Complete Response Type - when model completes current step
 export interface CurrentStepCompleteResponse {
-  completed: true;
-  success: boolean;
-  notes_to_future_self: string;
+  current_step: {
+    completed: true;
+    success: boolean;
+    notes_to_future_self: string;
+  };
+  next_step?: {
+    objective: string;
+    tool: string;
+    prompt: string;
+  };
+  later_steps?: string[];
 }
 
 // Next Step Response Type - for defining new steps (used in initial planning and step transitions)
@@ -60,16 +71,19 @@ export interface PlanStep {
 
 export interface PlanResponse {
   main_objective: string;
-  current_step_conclusion?: string;
-  next_step?: PlanStep;
-  future_steps: string[];
+  conclusion_from_assistant_data?: string;
+  assistant_data_was_helpful?: boolean;
+  next_step?: NextStepResponse;
+  later_steps: string[];
 }
 
 export interface PlanExecutionState {
   objective: string;
-  completedSteps: string[];
-  currentStep?: PlanStep;
-  futureSteps: string[];
+  completedSteps: CompletedStepRequest[];
+  currentStep?: NextStepResponse;
+  currentStepNotes?: string; // notes_to_future_self from previous iterations
+  currentStepAssistant?: AssistantToolResult; // current tool result for current step
+  laterSteps: string[];
   stepResults: string[];
 }
 
@@ -77,6 +91,7 @@ export interface ResponseGenerationConfig {
   toolResultsStreaming?: { template?: string };
   planDecision?: { template?: string }; // renamed from toolResultsNonStreaming
   planIteration?: { template?: string };
+  finalIteration?: { template?: string };
 }
 
 export interface SystemMessageConfig {
@@ -128,7 +143,7 @@ export class RequestProcessor {
       if (msg.role === 'assistant' && typeof msg.content === 'object' && msg.content.tool) {
         // New Assistant Tool Result Type format
         const assistantResult = msg.content as AssistantToolResult;
-        return `assistant: Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${JSON.stringify(assistantResult.args)}. Result: ${assistantResult.results}`;
+        return `assistant: Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${assistantResult.args}. Result: ${assistantResult.results}`;
       } else {
         // Standard message format
         return `${msg.role}: ${msg.content}`;
@@ -342,7 +357,7 @@ export class RequestProcessor {
       const parsed = JSON.parse(response.trim());
       const isPlan = parsed && 
              typeof parsed.main_objective === 'string' && 
-             Array.isArray(parsed.future_steps) &&
+             Array.isArray(parsed.later_steps) &&
              (parsed.next_step === undefined || 
               (typeof parsed.next_step === 'object' && 
                parsed.next_step.tool && 
@@ -351,7 +366,7 @@ export class RequestProcessor {
       this.logger.debug('PLAN DETECTION (DIRECT JSON)', {
         isPlan: isPlan,
         hasMainObjective: typeof parsed?.main_objective === 'string',
-        hasFutureSteps: Array.isArray(parsed?.future_steps),
+        hasLaterSteps: Array.isArray(parsed?.later_steps),
         hasValidNextStep: parsed.next_step === undefined || 
           (typeof parsed.next_step === 'object' && parsed.next_step.tool && parsed.next_step.prompt),
         parsedStructure: parsed
@@ -375,12 +390,12 @@ export class RequestProcessor {
           const parsed = JSON.parse(jsonMatch[0]);
           const isPlan = parsed && 
                  typeof parsed.main_objective === 'string' && 
-                 Array.isArray(parsed.future_steps);
+                 Array.isArray(parsed.later_steps);
 
           this.logger.debug('PLAN DETECTION (EXTRACTED JSON RESULT)', {
             isPlan: isPlan,
             hasMainObjective: typeof parsed?.main_objective === 'string',
-            hasFutureSteps: Array.isArray(parsed?.future_steps),
+            hasLaterSteps: Array.isArray(parsed?.later_steps),
             parsedStructure: parsed
           });
 
@@ -401,6 +416,144 @@ export class RequestProcessor {
     }
   }
 
+  // New methods for improved plan iteration handling
+  parseIterationResponse(response: string): CurrentStepIterationResponse | CurrentStepCompleteResponse | string | null {
+    this.logger.debug('ITERATION RESPONSE PARSING ATTEMPT', {
+      responseLength: response.length,
+      responsePreview: response.substring(0, 200) + '...'
+    });
+
+    try {
+      const parsed = JSON.parse(response.trim());
+      
+      // Check for current step iteration (Option 1)
+      if (parsed.current_step && parsed.current_step.tool && parsed.current_step.prompt) {
+        const iterationResponse: CurrentStepIterationResponse = {
+          current_step: {
+            notes_to_future_self: parsed.current_step.notes_to_future_self || '',
+            tool: parsed.current_step.tool,
+            prompt: parsed.current_step.prompt
+          },
+          later_steps: parsed.later_steps
+        };
+        
+        this.logger.debug('ITERATION RESPONSE: Current step iteration', {
+          response: iterationResponse
+        });
+        
+        return iterationResponse;
+      }
+      
+      // Check for step completion (Option 2)
+      if (parsed.current_step && parsed.current_step.completed === true) {
+        const completeResponse: CurrentStepCompleteResponse = {
+          current_step: {
+            completed: true,
+            success: parsed.current_step.success || false,
+            notes_to_future_self: parsed.current_step.notes_to_future_self || ''
+          },
+          next_step: parsed.next_step ? {
+            objective: parsed.next_step.objective,
+            tool: parsed.next_step.tool,
+            prompt: parsed.next_step.prompt
+          } : undefined,
+          later_steps: parsed.later_steps
+        };
+        
+        this.logger.debug('ITERATION RESPONSE: Step completion', {
+          response: completeResponse,
+          hasNextStep: !!parsed.next_step
+        });
+        
+        return completeResponse;
+      }
+      
+      // If neither pattern matches, treat as malformed
+      this.logger.debug('ITERATION RESPONSE: Malformed JSON structure', {
+        parsedStructure: parsed
+      });
+      return null;
+      
+    } catch (parseError) {
+      this.logger.debug('ITERATION RESPONSE (DIRECT JSON FAILED)', {
+        parseError: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+
+      // Try to extract JSON from markdown code blocks
+      const jsonMatch = response.match(/```json\s*\n?([\s\S]*?)\n?```/);
+      if (jsonMatch) {
+        this.logger.debug('ITERATION RESPONSE (EXTRACTED JSON FROM MARKDOWN)', {
+          extractedJson: jsonMatch[1],
+          jsonLength: jsonMatch[1].length
+        });
+
+        try {
+          const parsed = JSON.parse(jsonMatch[1].trim());
+          
+          // Check for current step iteration (Option 1)
+          if (parsed.current_step && parsed.current_step.tool && parsed.current_step.prompt) {
+            const iterationResponse: CurrentStepIterationResponse = {
+              current_step: {
+                notes_to_future_self: parsed.current_step.notes_to_future_self || '',
+                tool: parsed.current_step.tool,
+                prompt: parsed.current_step.prompt
+              },
+              later_steps: parsed.later_steps
+            };
+            
+            this.logger.debug('ITERATION RESPONSE: Current step iteration (from markdown)', {
+              response: iterationResponse
+            });
+            
+            return iterationResponse;
+          }
+          
+          // Check for step completion (Option 2)
+          if (parsed.current_step && parsed.current_step.completed === true) {
+            const completeResponse: CurrentStepCompleteResponse = {
+              current_step: {
+                completed: true,
+                success: parsed.current_step.success || false,
+                notes_to_future_self: parsed.current_step.notes_to_future_self || ''
+              },
+              next_step: parsed.next_step ? {
+                objective: parsed.next_step.objective,
+                tool: parsed.next_step.tool,
+                prompt: parsed.next_step.prompt
+              } : undefined,
+              later_steps: parsed.later_steps
+            };
+            
+            this.logger.debug('ITERATION RESPONSE: Step completion (from markdown)', {
+              response: completeResponse,
+              hasNextStep: !!parsed.next_step
+            });
+            
+            return completeResponse;
+          }
+          
+          // If neither pattern matches, treat as malformed
+          this.logger.debug('ITERATION RESPONSE: Malformed JSON structure (from markdown)', {
+            parsedStructure: parsed
+          });
+          return null;
+          
+        } catch (extractParseError) {
+          this.logger.debug('ITERATION RESPONSE (EXTRACTED JSON FAILED)', {
+            extractParseError: extractParseError instanceof Error ? extractParseError.message : 'Unknown parse error'
+          });
+        }
+      }
+
+      // Not JSON and no extractable JSON, treat as final conclusion (Option 3)
+      this.logger.debug('ITERATION RESPONSE: Final conclusion (non-JSON)', {
+        parseError: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+      return response.trim();
+    }
+  }
+
+
   extractPlanFromResponse(response: string): PlanResponse | null {
     this.logger.debug('PLAN EXTRACTION ATTEMPT', {
       responseLength: response.length,
@@ -413,7 +566,7 @@ export class RequestProcessor {
         this.logger.debug('PLAN EXTRACTION SUCCESS (DIRECT JSON)', {
           extractedPlan: parsed,
           objective: parsed.main_objective,
-          stepsCount: parsed.future_steps?.length || 0,
+          stepsCount: parsed.later_steps?.length || 0,
           hasNextStep: !!parsed.next_step
         });
         return parsed as PlanResponse;
@@ -433,11 +586,13 @@ export class RequestProcessor {
 
         try {
           const parsed = JSON.parse(jsonMatch[0]);
-          if (parsed && typeof parsed.main_objective === 'string') {
+          if (parsed && 
+              typeof parsed.main_objective === 'string' && 
+              Array.isArray(parsed.later_steps)) {
             this.logger.debug('PLAN EXTRACTION SUCCESS (EXTRACTED JSON)', {
               extractedPlan: parsed,
               objective: parsed.main_objective,
-              stepsCount: parsed.future_steps?.length || 0,
+              stepsCount: parsed.later_steps?.length || 0,
               hasNextStep: !!parsed.next_step
             });
             return parsed as PlanResponse;
@@ -462,10 +617,10 @@ export class RequestProcessor {
     this.logger.debug('PLAN STREAMING DETAILS', {
       plan: plan,
       objective: plan.main_objective,
-      futureStepsCount: plan.future_steps?.length || 0,
+      laterStepsCount: plan.later_steps?.length || 0,
       hasNextStep: !!plan.next_step,
       nextStepTool: plan.next_step?.tool,
-      nextStepPurpose: plan.next_step?.purpose,
+      nextStepObjective: plan.next_step?.objective,
       model: model
     });
 
@@ -497,8 +652,8 @@ export class RequestProcessor {
     this.streamChunk(res, planIntro, id, created, responseModel);
 
     // Stream plan steps
-    if (plan.future_steps && plan.future_steps.length > 0) {
-      plan.future_steps.forEach((step, index) => {
+    if (plan.later_steps && plan.later_steps.length > 0) {
+      plan.later_steps.forEach((step, index) => {
         const stepText = `- ${step}\n`;
         this.logger.debug('PLAN STREAMING STEP', {
           stepIndex: index,
@@ -511,7 +666,7 @@ export class RequestProcessor {
 
     // Stream current step if present
     if (plan.next_step) {
-      const stepHeader = `\n${plan.next_step.purpose}\n${'-'.repeat(plan.next_step.purpose.length)}\n`;
+      const stepHeader = `\n${plan.next_step.objective}\n${'-'.repeat(plan.next_step.objective.length)}\n`;
       this.logger.debug('PLAN STREAMING NEXT STEP HEADER', {
         stepHeader: stepHeader,
         headerLength: stepHeader.length,
@@ -529,7 +684,7 @@ export class RequestProcessor {
     return { id, created, responseModel };
   }
 
-  streamStepCompletion(res: any, stepResult: string, nextStep?: PlanStep, streamContext?: { id: string, created: number, responseModel: string }): void {
+  streamStepCompletion(res: any, stepResult: string, nextStep?: NextStepResponse, streamContext?: { id: string, created: number, responseModel: string }): void {
     this.logger.debug('STEP COMPLETION STREAMING START', {
       stepResult: stepResult,
       stepResultLength: stepResult.length,
@@ -555,7 +710,7 @@ export class RequestProcessor {
 
     // Stream next step if present
     if (nextStep) {
-      const stepHeader = `${nextStep.purpose}\n${'-'.repeat(nextStep.purpose.length)}\n`;
+      const stepHeader = `${nextStep.objective}\n${'-'.repeat(nextStep.objective.length)}\n`;
       this.logger.debug('STEP COMPLETION STREAMING NEXT STEP', {
         stepHeader: stepHeader,
         headerLength: stepHeader.length,
