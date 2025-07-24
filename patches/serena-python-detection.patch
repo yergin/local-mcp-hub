@@ -1,0 +1,78 @@
+--- a/mcps/serena/src/solidlsp/language_servers/pyright_server.py
++++ b/mcps/serena/src/solidlsp/language_servers/pyright_server.py
+@@ -5,6 +5,7 @@
+ import os
+ import pathlib
+ import re
++import subprocess
+ import threading
+ 
+ from overrides import override
+@@ -16,6 +17,38 @@
+ from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
+ 
+ 
++def _detect_python_command() -> str:
++    """
++    Automatically detect the correct Python command to use for Pyright.
++    First tries the current Python executable (which should have pyright installed),
++    then falls back to common system Python commands.
++    
++    Returns:
++        str: The Python command to use (e.g., 'python3', 'python', 'py')
++        
++    Raises:
++        RuntimeError: If no suitable Python command is found
++    """
++    import sys
++    
++    # First try the current Python executable (virtual environment's Python)
++    # This is most likely to have pyright installed
++    python_commands = [sys.executable]
++    
++    # Then try common system Python commands as fallback
++    python_commands.extend(['python3', 'python', 'py'])
++    
++    for cmd in python_commands:
++        try:
++            # Test if the command exists and can import pyright
++            result = subprocess.run(
++                [cmd, '-c', 'import pyright.langserver; print("OK")'],
++                capture_output=True,
++                text=True,
++                timeout=5
++            )
++            if result.returncode == 0 and 'OK' in result.stdout:
++                return cmd
++        except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError):
++            continue
++    
++    # If we get here, no Python command worked
++    raise RuntimeError(
++        "Could not find a suitable Python command with pyright installed. "
++        f"Tried: {', '.join(python_commands)}. "
++        "Please ensure Python is installed and pyright is available via 'pip install pyright' or 'npm install -g pyright'"
++    )
++
++
+ class PyrightServer(SolidLanguageServer):
+     """
+     Provides Python specific instantiation of the LanguageServer class using Pyright.
+@@ -27,11 +60,15 @@
+         Creates a PyrightServer instance. This class is not meant to be instantiated directly.
+         Use LanguageServer.create() instead.
+         """
++        # Automatically detect the correct Python command to use
++        python_cmd = _detect_python_command()
++        logger.log(f"Using Python command: {python_cmd}", logging.INFO)
++        
+         super().__init__(
+             config,
+             logger,
+             repository_root_path,
+             # Note 1: we can also use `pyright-langserver --stdio` but it requires pyright to be installed with npm
+             # Note 2: we can also use `bpyright-langserver --stdio` if we ever are unhappy with pyright
+-            ProcessLaunchInfo(cmd="python -m pyright.langserver --stdio", cwd=repository_root_path),
++            ProcessLaunchInfo(cmd=f"{python_cmd} -m pyright.langserver --stdio", cwd=repository_root_path),
+             "python",
+         )

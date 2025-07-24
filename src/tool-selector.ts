@@ -201,12 +201,12 @@ export class ToolSelector {
         this.logger.info('Using fast model for simple argument generation', {
           tool: toolSelection.tool,
         });
-        argsSelection = await this.generateArgsWithFastModel(userRequest, selectedTool);
+        argsSelection = await this.generateArgsWithFastModel(userRequest, selectedTool, systemContext);
       } else {
         this.logger.info(
           `🧠 Using full model for complex argument generation: ${toolSelection.tool}`
         );
-        argsSelection = await this.generateArgsWithFullModel(userRequest, selectedTool);
+        argsSelection = await this.generateArgsWithFullModel(userRequest, selectedTool, systemContext);
       }
 
       const modelType = this.isSimpleArgumentGeneration(toolSelection.tool)
@@ -229,7 +229,8 @@ export class ToolSelector {
 
   async generateArgsWithFastModel(
     userRequest: string,
-    toolSchema: OpenAITool
+    toolSchema: OpenAITool,
+    systemContext?: string
   ): Promise<any> {
     const params = Object.entries(toolSchema.function.parameters.properties || {})
       .map(
@@ -241,6 +242,7 @@ export class ToolSelector {
     // Use configured prompt template for fast model
     const fastArgsTemplate = this.argumentGenerationConfig.fastModel.template;
     const argsPrompt = fastArgsTemplate
+      .replace('{systemContext}', systemContext || 'Project structure not available')
       .replace('{toolName}', toolSchema.function.name)
       .replace('{userRequest}', userRequest)
       .replace('{params}', params);
@@ -274,7 +276,8 @@ export class ToolSelector {
 
   async generateArgsWithFullModel(
     userRequest: string,
-    toolSchema: OpenAITool
+    toolSchema: OpenAITool,
+    systemContext?: string
   ): Promise<any> {
     const params = Object.entries(toolSchema.function.parameters.properties || {})
       .map(
@@ -286,6 +289,7 @@ export class ToolSelector {
     // Use configured prompt template for full model
     const fullArgsTemplate = this.argumentGenerationConfig.fullModel.template;
     const argsPrompt = fullArgsTemplate
+      .replace('{systemContext}', systemContext || 'Project structure not available')
       .replace('{userRequest}', userRequest)
       .replace('{toolName}', toolSchema.function.name)
       .replace('{toolDescription}', toolSchema.function.description)

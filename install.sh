@@ -84,9 +84,16 @@ else
     git clone https://github.com/upstash/context7.git
 fi
 
+# Apply patches to Serena
+echo "🔧 Applying patches to Serena..."
+cd serena
+if [ -f "../../patches/serena-python-detection.patch" ]; then
+    echo "   Applying Python detection patch..."
+    patch -p1 < ../../patches/serena-python-detection.patch
+fi
+
 # Set up Serena
 echo "🔧 Setting up Serena..."
-cd serena
 if [ ! -d ".venv" ]; then
     echo "   Creating Python virtual environment..."
     uv venv

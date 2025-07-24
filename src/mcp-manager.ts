@@ -17,15 +17,18 @@ export interface OpenAITool {
 
 export interface MCPConfig {
   enabled: string[];
+  initializationTimeoutMs?: number;
+  toolCallTimeoutMs?: number;
 }
 
 export class MCPManager {
   private logger: winston.Logger;
   private config: MCPConfig;
   private mcpToolSchemas: Map<string, OpenAITool> = new Map();
-  private schemasInitialized: boolean = false;
+  private initializationComplete: boolean = false;
   private mcpProcesses: Map<string, ChildProcess> = new Map();
   private mcpProcessReady: Map<string, boolean> = new Map();
+  private mcpInitializationStatus: Map<string, 'pending' | 'success' | 'failed'> = new Map();
   private argumentHints: Record<string, Record<string, string>> = {};
 
   constructor(config: MCPConfig, logger: winston.Logger, argumentHints?: Record<string, Record<string, string>>) {
@@ -35,11 +38,34 @@ export class MCPManager {
   }
 
   get isInitialized(): boolean {
-    return this.schemasInitialized;
+    return this.initializationComplete;
+  }
+
+  get areAllProcessesReady(): boolean {
+    // Check if all enabled MCP servers are ready (successfully initialized MCPs only)
+    if (!this.initializationComplete || this.config.enabled.length === 0) {
+      return false;
+    }
+    
+    // At least one MCP must be successfully ready
+    for (const mcpName of this.config.enabled) {
+      if (this.mcpProcessReady.get(mcpName) === true) {
+        return true;
+      }
+    }
+    return false;
   }
 
   get toolCount(): number {
     return this.mcpToolSchemas.size;
+  }
+
+  private get initializationTimeoutMs(): number {
+    return this.config.initializationTimeoutMs ?? 60000;
+  }
+
+  private get toolCallTimeoutMs(): number {
+    return this.config.toolCallTimeoutMs ?? 30000;
   }
 
   private enhanceParameterWithHints(toolName: string, paramName: string, paramSchema: any): any {
@@ -88,37 +114,89 @@ export class MCPManager {
 
   getOpenAITools(): OpenAITool[] {
     this.logger.debug(
-      `DEBUG: Getting OpenAI tools, schemasInitialized=${this.schemasInitialized}, schemas.size=${this.mcpToolSchemas.size}`
+      `DEBUG: Getting OpenAI tools, initializationComplete=${this.initializationComplete}, schemas.size=${this.mcpToolSchemas.size}`
     );
 
-    if (this.schemasInitialized && this.mcpToolSchemas.size > 0) {
+    if (this.initializationComplete && this.mcpToolSchemas.size > 0) {
       const tools = Array.from(this.mcpToolSchemas.values());
       this.logger.debug(`DEBUG: Returning ${tools.length} tools`);
       this.logger.debug(`DEBUG: Tool names: ${tools.map(t => t.function.name).join(', ')}`);
       return tools;
     }
 
-    this.logger.warn('MCP schemas not initialized yet, returning empty tools list');
+    this.logger.warn('MCP initialization not complete yet, returning empty tools list');
     return [];
   }
 
   async initializeMCPSchemas(): Promise<void> {
-    this.logger.info('Initializing MCP tool schemas...');
+    this.logger.info('Initializing MCP tool schemas in parallel...');
 
+    // Initialize status tracking for all enabled MCPs
     for (const mcpName of this.config.enabled) {
+      this.mcpInitializationStatus.set(mcpName, 'pending');
+      this.mcpProcessReady.set(mcpName, false);
+    }
+
+    if (this.config.enabled.length === 0) {
+      this.logger.warn('No MCP servers enabled in configuration');
+      this.initializationComplete = true;
+      return;
+    }
+
+    // Start all MCP initializations in parallel
+    const initializationPromises = this.config.enabled.map(async (mcpName) => {
       try {
+        this.logger.info(`Starting initialization of ${mcpName}...`);
         const schemas = await this.getMCPToolSchemas(mcpName);
+        
+        // Add schemas to the global map
         schemas.forEach(schema => {
           this.mcpToolSchemas.set(schema.function.name, schema);
         });
-        this.logger.info(`Loaded ${schemas.length} tool schemas from ${mcpName}`);
+        
+        this.mcpInitializationStatus.set(mcpName, 'success');
+        this.logger.info(`✓ Successfully loaded ${schemas.length} tool schemas from ${mcpName}`);
+        
+        return { mcpName, success: true, schemas: schemas.length };
       } catch (error) {
-        this.logger.error(`Failed to load schemas from ${mcpName}:`, error);
+        this.mcpInitializationStatus.set(mcpName, 'failed');
+        this.mcpProcessReady.set(mcpName, false);
+        this.logger.error(`✗ Failed to load schemas from ${mcpName}:`, error);
+        
+        return { mcpName, success: false, error: error };
+      }
+    });
+
+    // Wait for all initialization attempts to complete
+    const results = await Promise.allSettled(initializationPromises);
+    
+    // Log final results
+    let successCount = 0;
+    let failureCount = 0;
+    
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        if (result.value.success) {
+          successCount++;
+        } else {
+          failureCount++;
+        }
+      } else {
+        failureCount++;
+        this.logger.error('Unexpected initialization error:', result.reason);
       }
     }
 
-    this.schemasInitialized = true;
+    this.initializationComplete = true;
+    this.logger.info(`MCP initialization complete: ${successCount} successful, ${failureCount} failed`);
     this.logger.info(`Total MCP tools loaded: ${this.mcpToolSchemas.size}`);
+    
+    // Log the status of each MCP
+    for (const mcpName of this.config.enabled) {
+      const status = this.mcpInitializationStatus.get(mcpName);
+      const ready = this.mcpProcessReady.get(mcpName);
+      this.logger.info(`  ${mcpName}: ${status} (ready: ${ready})`);
+    }
   }
 
   private async getMCPToolSchemas(mcpName: string): Promise<OpenAITool[]> {
@@ -140,7 +218,7 @@ export class MCPManager {
           '--transport',
           'stdio',
           '--tool-timeout',
-          '30',
+          Math.floor(this.toolCallTimeoutMs / 1000).toString(),
           '--log-level',
           'WARNING',
         ];
@@ -159,6 +237,7 @@ export class MCPManager {
       this.mcpProcessReady.set(mcpName, false);
 
       let responseBuffer = '';
+      let stderrBuffer = '';
       let initialized = false;
       const schemas: OpenAITool[] = [];
 
@@ -274,7 +353,17 @@ export class MCPManager {
 
       mcpProcess.stderr?.on('data', data => {
         const stderr = data.toString();
-        this.logger.debug(`${mcpName} stderr:`, stderr.trim());
+        stderrBuffer += stderr;
+        
+        // Log each line of stderr
+        const stderrLines = stderrBuffer.split('\n');
+        stderrBuffer = stderrLines.pop() || ''; // Keep incomplete line in buffer
+        
+        for (const line of stderrLines) {
+          if (line.trim()) {
+            this.logger.debug(`${mcpName} stderr:`, line.trim());
+          }
+        }
 
         // For Serena, wait for language server to be ready before sending tools/list
         if (
@@ -345,7 +434,7 @@ export class MCPManager {
           this.mcpProcessReady.delete(mcpName);
           reject(new Error(`Timeout getting schemas from ${mcpName}`));
         }
-      }, 30000);
+      }, this.initializationTimeoutMs);
     });
   }
 
@@ -492,7 +581,7 @@ export class MCPManager {
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error(`Tool call timeout for ${toolName}`));
-      }, 30000);
+      }, this.toolCallTimeoutMs);
 
       // Wrap cleanup and timeout clearing
       const originalCleanup = cleanup;

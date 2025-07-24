@@ -212,7 +212,7 @@ class LocalMCPHub {
     }
 
     try {
-      if (!this.mcpManager.isInitialized) {
+      if (!this.mcpManager.areAllProcessesReady) {
         return 'System context unavailable (MCP tools initializing)';
       }
 
@@ -433,9 +433,9 @@ class LocalMCPHub {
           return;
         }
 
-        // Check if MCP tools are initialized yet
-        if (!this.mcpManager.isInitialized) {
-          logger.warn('MCP tools not yet initialized, sending initialization message');
+        // Check if all MCP processes are ready yet
+        if (!this.mcpManager.areAllProcessesReady) {
+          logger.warn('MCP tools not yet ready, sending initialization message');
           const initMessage = this.prompts.systemMessages!.mcpInitializing!.template!.replace(
             '{port}',
             this.config.hub.port.toString()
@@ -500,15 +500,6 @@ class LocalMCPHub {
                 // Create messages with tool result for decision making using new Assistant Tool Result Type
                 const messagesWithTool = [
                   ...messages,
-                  {
-                    role: 'assistant',
-                    content: {
-                      tool: 'list_dir',
-                      prompt: 'Provide directory context for better planning',
-                      args: JSON.stringify({ relative_path: '.', recursive: false }),
-                      results: systemContext
-                    }
-                  },
                   {
                     role: 'assistant',
                     content: {
@@ -861,7 +852,7 @@ class LocalMCPHub {
           });
         }
 
-        if (!this.mcpManager.isInitialized) {
+        if (!this.mcpManager.areAllProcessesReady) {
           return res.status(503).json({
             error: 'Service unavailable',
             message: 'MCP tools are still initializing',
@@ -1210,7 +1201,7 @@ class LocalMCPHub {
         const currentStepRequest: CurrentStepRequest = {
           objective: executionState.currentStep?.objective || 'No current step',
           completed: false, // Always false since we're still working on it
-          notes: executionState.currentStepNotes || 'No previous notes',
+          notes: executionState.currentStepNotes || '',
           assistant: executionState.currentStepAssistant || {
             tool: 'none',
             prompt: 'No tool executed yet',
@@ -1219,22 +1210,33 @@ class LocalMCPHub {
           }
         };
         
-        const currentStepJSON = JSON.stringify(currentStepRequest, null, 2);
+        // Format current step as readable text instead of JSON
+        const notesLine = currentStepRequest.notes && currentStepRequest.notes.trim() 
+          ? `   Notes: "${currentStepRequest.notes}"\n` 
+          : '';
+        const currentStepText = `   Objective: "${currentStepRequest.objective}"
+   Completed: ${currentStepRequest.completed}
+${notesLine}   Completed Assistant Task:
+      Tool Used: ${currentStepRequest.assistant.tool}
+      Tool Prompt: "${currentStepRequest.assistant.prompt}"
+      Tool Args: ${currentStepRequest.assistant.args}
+      Tool Results: "${currentStepRequest.assistant.results}"`;
         
         // Use finalIteration template if this is the last iteration
         let planIterationPrompt: string;
         if (iterationCount >= maxIterations) {
-          const currentStepStatus = executionState.currentStep ? `Working on: ${executionState.currentStep.objective}` : 'No current step';
           planIterationPrompt = this.prompts.responseGeneration!.finalIteration!.template!
             .replace('{objective}', executionState.objective)
             .replace('{completedSteps}', completedStepsText)
-            .replace('{currentStepStatus}', currentStepStatus);
+            .replace('{currentStepStatus}', currentStepText);
         } else {
+          const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
           planIterationPrompt = this.prompts.responseGeneration!.planIteration!.template!
+            .replace('{systemPrompt}', systemPrompt)
             .replace('{userPrompt}', userPrompt)
             .replace('{objective}', executionState.objective)
             .replace('{completedSteps}', completedStepsText)
-            .replace('{currentStep}', currentStepJSON)
+            .replace('{currentStep}', currentStepText)
             .replace('{nextSteps}', nextStepsText)
             .replace('{toolNamesAndHints}', toolNamesAndHints);
         }

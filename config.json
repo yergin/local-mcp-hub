@@ -9,6 +9,8 @@
     "cors_origins": ["*"]
   },
   "mcps": {
-    "enabled": ["serena", "context7"]
+    "enabled": ["serena", "context7"],
+    "initializationTimeoutMs": 60000,
+    "toolCallTimeoutMs": 45000
   }
 }

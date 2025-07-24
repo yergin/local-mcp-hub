@@ -119,7 +119,9 @@ Main configuration file controlling:
 
 - **ollama**: Ollama server connection and model settings
 - **hub**: Server port, logging, and CORS configuration  
-- **mcps**: Enabled MCP servers list
+- **mcps**: Enabled MCP servers list and timeout configurations
+  - `initializationTimeoutMs`: Time to wait for MCP servers to start (default: 60000ms)
+  - `toolCallTimeoutMs`: Maximum time for individual tool operations (default: 45000ms)
 
 ### prompts.json
 
@@ -186,6 +188,8 @@ local-mcp-hub/
 ├── mcps/                   # MCP server implementations (downloaded during installation)
 │   ├── serena/             # Code analysis MCP server
 │   └── context7/           # Library documentation MCP server
+├── patches/                # Patch files applied to downloaded dependencies
+│   └── serena-python-detection.patch # Automatic Python detection for Serena
 ├── config.json             # Main configuration
 ├── prompts.json            # Prompt templates and tool guidance
 ├── continue-config.yaml    # Continue extension configuration
@@ -279,6 +283,50 @@ Or set environment variable:
 ```bash
 LOG_LEVEL=debug npm start
 ```
+
+## Known Issues
+
+### Serena Language Server Initialization Issues
+
+**Symptoms:**
+- Serena takes a long time to initialize (25+ seconds) or fails to start
+- Code analysis tools are not available
+- Timeout errors in the logs
+
+**Root Cause:**
+The Pyright language server cannot start due to missing Python installation or incompatible Python command.
+
+**Automatic Resolution:**
+This issue has been resolved with an automatic Python detection patch that is applied during installation. The system now:
+
+1. **Auto-detects** the correct Python command (`python3`, `python`, or `py`)
+2. **Provides clear error messages** if no suitable Python installation is found
+3. **Logs the detected Python command** for troubleshooting
+
+**Manual Troubleshooting:**
+If you still encounter issues after installation, ensure:
+
+1. **Python is installed** and accessible:
+   ```bash
+   python3 --version  # or python --version
+   ```
+
+2. **Pyright is available**:
+   ```bash
+   # Install via pip
+   pip install pyright
+   
+   # Or install via npm (alternative)
+   npm install -g pyright
+   ```
+
+3. **Check the logs** for the detected Python command:
+   ```
+   Using Python command: python3
+   ```
+
+**Expected Behavior:**
+After proper installation, Serena should initialize in under 5 seconds and display the detected Python command in the logs.
 
 ## Contributing
 
