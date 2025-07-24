@@ -42,6 +42,7 @@ interface PromptsConfig {
     usageHints?: Record<string, string>;
     fastModelTools?: string[];
     safeTools?: string[];
+    argumentHints?: Record<string, Record<string, string>>;
   };
   responseGeneration?: {
     toolResultsStreaming?: { template?: string };
@@ -129,6 +130,8 @@ class LocalMCPHub {
   private mcpManager: MCPManager;
   private toolSelector: ToolSelector;
   private requestProcessor: RequestProcessor;
+  private cachedSystemContext: string | null = null;
+  private systemContextTimestamp: number = 0;
 
   constructor() {
     this.app = express();
@@ -138,7 +141,11 @@ class LocalMCPHub {
 
     // Initialize extracted classes
     this.ollamaClient = new OllamaClient(this.config.ollama, logger);
-    this.mcpManager = new MCPManager(this.config.mcps, logger);
+    this.mcpManager = new MCPManager(
+      this.config.mcps, 
+      logger, 
+      this.prompts.toolGuidance?.argumentHints
+    );
     this.toolSelector = new ToolSelector(
       this.ollamaClient,
       this.prompts.toolGuidance || {},
@@ -150,6 +157,7 @@ class LocalMCPHub {
       this.ollamaClient,
       this.prompts.responseGeneration || {},
       this.prompts.systemMessages || {},
+      this.toolSelector,
       logger
     );
 
@@ -194,6 +202,65 @@ class LocalMCPHub {
 
   private getTmpPath(...segments: string[]): string {
     return path.join(__dirname, '..', '.tmp', ...segments);
+  }
+
+  private async getSystemContext(forceRefresh: boolean = false): Promise<string> {
+    // Use cached version if available and not forcing refresh
+    if (!forceRefresh && this.cachedSystemContext && Date.now() - this.systemContextTimestamp < 30000) {
+      logger.debug('Using cached system context');
+      return this.cachedSystemContext;
+    }
+
+    try {
+      if (!this.mcpManager.isInitialized) {
+        return 'System context unavailable (MCP tools initializing)';
+      }
+
+      logger.debug(forceRefresh ? 'Refreshing system context' : 'Building initial system context');
+
+      // Get recursive directory listing and prune to 1 level deep
+      const result = await this.mcpManager.callMCPTool('list_dir', { 
+        relative_path: '.', 
+        recursive: true 
+      });
+      const data = JSON.parse(result);
+
+      const allItems: string[] = [];
+
+      // Add files up to 1 level deep
+      if (data.files) {
+        for (const file of data.files) {
+          const pathParts = file.split('/');
+          if (pathParts.length <= 2) {
+            allItems.push(file);
+          }
+        }
+      }
+
+      // Add directories up to 1 level deep (with trailing slash)
+      if (data.dirs) {
+        for (const dir of data.dirs) {
+          const pathParts = dir.split('/');
+          if (pathParts.length <= 2) {
+            allItems.push(dir + '/');
+          }
+        }
+      }
+
+      // Sort alphabetically
+      allItems.sort();
+
+      const systemContext = `Project structure (1 level deep):\n${allItems.join(', ')}`;
+      
+      // Cache the result
+      this.cachedSystemContext = systemContext;
+      this.systemContextTimestamp = Date.now();
+      
+      return systemContext;
+    } catch (error) {
+      logger.warn('Failed to gather system context:', error);
+      return 'System context unavailable';
+    }
   }
 
   private ensureTmpDirectory(): void {
@@ -349,10 +416,18 @@ class LocalMCPHub {
 
         if (hasToolResults) {
           // Generate final response using tool results
+          const mcpTools = this.mcpManager
+            .getOpenAITools()
+            .map(tool => this.toolSelector.enhanceToolWithUsageGuidance(tool));
+          
+          const systemContext = await this.getSystemContext();
+          
           const response = await this.requestProcessor.generateResponseWithToolResults(
             messages,
             temperature,
-            max_tokens
+            max_tokens,
+            mcpTools,
+            systemContext
           );
           this.requestProcessor.sendStreamingResponse(res, response, this.config.ollama.model);
           return;
@@ -380,25 +455,25 @@ class LocalMCPHub {
           tools: mcpTools.map((t: OpenAITool) => t.function.name),
         });
 
-        // Get directory context for better tool selection and planning
-        let directoryContext = '';
+        // Get system context for better tool selection and planning (cached)
+        let systemContext = '';
         try {
-          const dirContextStartTime = Date.now();
-          directoryContext = await this.mcpManager.callMCPTool('list_dir', { relative_path: '.', recursive: false });
-          logTiming('Directory context gathering', dirContextStartTime);
-          logger.debug('Directory context gathered', {
-            contextLength: directoryContext.length,
-            contextPreview: directoryContext.substring(0, 200) + '...'
+          const systemContextStartTime = Date.now();
+          systemContext = await this.getSystemContext(); // Uses cache by default
+          logTiming('System context gathering (cached)', systemContextStartTime);
+          logger.debug('System context gathered for tool selection', {
+            contextLength: systemContext.length,
+            contextPreview: systemContext.substring(0, 200) + '...'
           });
-        } catch (dirError) {
-          logger.warn('Failed to gather directory context for tool selection', {
-            error: dirError instanceof Error ? dirError.message : 'Unknown error'
+        } catch (contextError) {
+          logger.warn('Failed to gather system context for tool selection', {
+            error: contextError instanceof Error ? contextError.message : 'Unknown error'
           });
-          directoryContext = 'Directory context unavailable';
+          systemContext = 'System context unavailable';
         }
 
         const selectionStartTime = Date.now();
-        const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools, directoryContext);
+        const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools, undefined, systemContext);
         logTiming('Tool selection', selectionStartTime);
         logger.info('Tool selected', {
           tool: toolSelection?.tool,
@@ -431,7 +506,7 @@ class LocalMCPHub {
                       tool: 'list_dir',
                       prompt: 'Provide directory context for better planning',
                       args: JSON.stringify({ relative_path: '.', recursive: false }),
-                      results: directoryContext
+                      results: systemContext
                     }
                   },
                   {
@@ -459,7 +534,9 @@ class LocalMCPHub {
                 const response = await this.requestProcessor.generateResponseWithToolResults(
                   messagesWithTool,
                   temperature,
-                  max_tokens
+                  max_tokens,
+                  mcpTools,
+                  systemContext
                 );
 
                 logger.debug('PLAN DECISION RESPONSE', {
@@ -859,6 +936,9 @@ class LocalMCPHub {
           this.prompts.responseGeneration || {},
           this.prompts.systemMessages || {}
         );
+
+        // Update MCP Manager with new argument hints (without rebuilding schemas)
+        this.mcpManager.updateArgumentHints(this.prompts.toolGuidance?.argumentHints);
         
         logger.info('Prompts configuration reloaded successfully');
         res.json({
@@ -976,14 +1056,14 @@ class LocalMCPHub {
 
       try {
         // Generate arguments for the current step's tool
-        const mcpTools = this.mcpManager.getOpenAITools();
-        const currentTool = mcpTools.find(tool => tool.function.name === executionState.currentStep!.tool);
+        const availableMcpTools = this.mcpManager.getOpenAITools();
+        const currentTool = availableMcpTools.find(tool => tool.function.name === executionState.currentStep!.tool);
         
         logger.debug('PLAN STEP TOOL LOOKUP', {
           requestedTool: executionState.currentStep!.tool,
           toolFound: !!currentTool,
-          availableToolNames: mcpTools.map(t => t.function.name),
-          totalAvailableTools: mcpTools.length
+          availableToolNames: availableMcpTools.map((t: any) => t.function.name),
+          totalAvailableTools: availableMcpTools.length
         });
 
         let toolResult: string;
@@ -992,11 +1072,11 @@ class LocalMCPHub {
           logger.error(`Tool not found: ${executionState.currentStep!.tool}`);
           logger.debug('PLAN STEP TOOL NOT FOUND', {
             requestedTool: executionState.currentStep!.tool,
-            availableTools: mcpTools.map(t => ({ name: t.function.name, description: t.function.description }))
+            availableTools: availableMcpTools.map(t => ({ name: t.function.name, description: t.function.description }))
           });
           
           // Treat tool not found as a step result and continue with plan iteration
-          toolResult = `Error: Tool "${executionState.currentStep!.tool}" does not exist. Available tools: ${mcpTools.map(t => t.function.name).join(', ')}`;
+          toolResult = `Error: Tool "${executionState.currentStep!.tool}" does not exist. Available tools: ${availableMcpTools.map(t => t.function.name).join(', ')}`;
           
           // Store tool not found error as assistant data
           executionState.currentStepAssistant = {
@@ -1101,11 +1181,29 @@ class LocalMCPHub {
           updatedExecutionState: executionState
         });
 
+        // Extract user prompt from original messages
+        const userMessage = originalMessages.find(msg => msg.role === 'user');
+        const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
+
+        // Get tools with usage hints for the prompt
+        const iterationMcpTools = this.mcpManager
+          .getOpenAITools()
+          .map(tool => this.toolSelector.enhanceToolWithUsageGuidance(tool));
+        const toolNamesAndHints = this.toolSelector.formatToolsWithUsageHints(iterationMcpTools);
+
+        // Get refreshed system context for plan iteration (files may have changed)
+        const systemContext = await this.getSystemContext(true); // Force refresh
+
         // Create prompt for plan iteration using the new template format
         const completedStepsText = executionState.completedSteps.length > 0 
           ? executionState.completedSteps.map((step, i) => 
               `${i+1}. Objective: "${step.objective}"\n   Success: ${step.success}\n   Conclusion: "${step.conclusion}"`
             ).join('\n')
+          : 'None';
+        
+        // Format next steps
+        const nextStepsText = executionState.laterSteps.length > 0
+          ? executionState.laterSteps.map((step, i) => `${i+1}. ${step}`).join('\n')
           : 'None';
         
         // Build structured CurrentStepRequest object according to specification
@@ -1133,9 +1231,12 @@ class LocalMCPHub {
             .replace('{currentStepStatus}', currentStepStatus);
         } else {
           planIterationPrompt = this.prompts.responseGeneration!.planIteration!.template!
+            .replace('{userPrompt}', userPrompt)
             .replace('{objective}', executionState.objective)
             .replace('{completedSteps}', completedStepsText)
-            .replace('{currentStep}', currentStepJSON);
+            .replace('{currentStep}', currentStepJSON)
+            .replace('{nextSteps}', nextStepsText)
+            .replace('{toolNamesAndHints}', toolNamesAndHints);
         }
 
         logger.debug('PLAN ITERATION PROMPT', {
@@ -1154,7 +1255,10 @@ class LocalMCPHub {
           maxTokens: maxTokens
         });
 
-        const response = await this.ollamaClient.sendToOllama(planIterationPrompt, temperature, maxTokens);
+        // Add system context to plan iteration prompt
+        const fullPlanIterationPrompt = `${systemContext}\n\n${planIterationPrompt}`;
+        
+        const response = await this.ollamaClient.sendToOllama(fullPlanIterationPrompt, temperature, maxTokens);
 
         logger.debug('PLAN ITERATION OLLAMA RESPONSE', {
           responseLength: response.length,

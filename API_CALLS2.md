@@ -627,10 +627,9 @@ The model start going in a loop because it was unable to use the tools correctly
 Actions
 =======
 
-1. Fix JSON snake_case.
-2. Add tools list and USE WHEN hints to the Plan Decision prompt.
-3. Fix Plan Iteration prompt context also including the tools with USE WHEN hints here.
-4. Emphasize in find_file USE_WHEN prompt that the search is recursive and only one file pattern can be searched for at a time.
+1. Add tools list and USE WHEN hints to the Plan Decision prompt.
+2. Fix Plan Iteration prompt context also including the tools with USE WHEN hints here.
+3. Emphasize in find_file USE_WHEN prompt that the search is recursive and only one file pattern can be searched for at a time.
 4. Emphasize in list_dir USE_WHEN prompt that instructions should explicitly state whether or not to do a recursive search.
 5. Always include a list of files and folders one directory deep as a system context to prompts.
 6. Add an `argumentHints` section to `toolGuidance` which are hints that get appended to the argument's description for the argument building phases. Add the following hint:

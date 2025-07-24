@@ -1,5 +1,7 @@
 import winston from 'winston';
 import { OllamaClient } from './ollama-client';
+import { ToolSelector } from './tool-selector';
+import { OpenAITool } from './mcp-manager';
 
 export interface FIMRequest {
   prefix: string;
@@ -103,16 +105,19 @@ export class RequestProcessor {
   private ollamaClient: OllamaClient;
   private responseConfig: ResponseGenerationConfig;
   private systemConfig: SystemMessageConfig;
+  private toolSelector: ToolSelector;
 
   constructor(
     ollamaClient: OllamaClient,
     responseConfig: ResponseGenerationConfig,
     systemConfig: SystemMessageConfig,
+    toolSelector: ToolSelector,
     logger: winston.Logger
   ) {
     this.ollamaClient = ollamaClient;
     this.responseConfig = responseConfig;
     this.systemConfig = systemConfig;
+    this.toolSelector = toolSelector;
     this.logger = logger;
   }
 
@@ -122,7 +127,7 @@ export class RequestProcessor {
     this.logger.debug('RequestProcessor configuration updated');
   }
 
-  convertMessagesToPrompt(messages: any[]): string {
+  convertMessagesToPrompt(messages: any[], systemContext?: string): string {
     // Check if we should override the system prompt
     const customSystem = this.systemConfig.customSystemPrompt;
     let modifiedMessages = messages;
@@ -139,16 +144,27 @@ export class RequestProcessor {
     }
     
     // Convert messages to prompt, handling both old and new assistant message formats
-    const prompt = modifiedMessages.map(msg => {
+    const promptParts = modifiedMessages.map((msg, index) => {
+      let messageText: string;
+      
       if (msg.role === 'assistant' && typeof msg.content === 'object' && msg.content.tool) {
         // New Assistant Tool Result Type format
         const assistantResult = msg.content as AssistantToolResult;
-        return `assistant: Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${assistantResult.args}. Result: ${assistantResult.results}`;
+        messageText = `assistant: Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${assistantResult.args}. Result: ${assistantResult.results}`;
       } else {
         // Standard message format
-        return `${msg.role}: ${msg.content}`;
+        messageText = `${msg.role}: ${msg.content}`;
       }
-    }).join('\n\n');
+      
+      // If this is the system message and we have system context, add it after
+      if (msg.role === 'system' && systemContext) {
+        messageText += '\n\n' + systemContext;
+      }
+      
+      return messageText;
+    });
+    
+    const prompt = promptParts.join('\n\n');
     
     // Debug logging: Prompt conversion
     this.logger.debug('PROMPT CONVERSION', {
@@ -274,13 +290,26 @@ export class RequestProcessor {
   async generateResponseWithToolResults(
     messages: any[],
     temperature: number,
-    maxTokens: number
+    maxTokens: number,
+    tools?: OpenAITool[],
+    systemContext?: string
   ): Promise<string> {
     // Convert all messages to prompt (now includes embedded tool results in assistant messages)
-    let prompt = this.convertMessagesToPrompt(messages);
+    let prompt = this.convertMessagesToPrompt(messages, systemContext);
     
     // Add the plan decision template
-    prompt += '\n\n' + this.responseConfig.planDecision!.template!;
+    let planDecisionTemplate = this.responseConfig.planDecision!.template!;
+    
+    // If tools are provided, replace the toolNamesAndHints placeholder
+    if (tools && tools.length > 0) {
+      const toolNamesAndHints = this.toolSelector.formatToolsWithUsageHints(tools);
+      planDecisionTemplate = planDecisionTemplate.replace('{toolNamesAndHints}', toolNamesAndHints);
+    } else {
+      // If no tools provided, remove the placeholder and related text
+      planDecisionTemplate = planDecisionTemplate.replace('\n\nAvailable tools:\n{toolNamesAndHints}', '');
+    }
+    
+    prompt += '\n\n' + planDecisionTemplate;
 
     // Debug logging: Final response generation prompt
     this.logger.debug('PLAN DECISION PROMPT (TOOL RESULTS)', {
@@ -288,7 +317,9 @@ export class RequestProcessor {
       finalPrompt: prompt,
       promptLength: prompt.length,
       temperature: temperature,
-      maxTokens: maxTokens
+      maxTokens: maxTokens,
+      toolsProvided: tools ? tools.length : 0,
+      hasSystemContext: !!systemContext
     });
 
     return await this.ollamaClient.sendToOllama(prompt, temperature, maxTokens);

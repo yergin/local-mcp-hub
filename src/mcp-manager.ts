@@ -26,10 +26,12 @@ export class MCPManager {
   private schemasInitialized: boolean = false;
   private mcpProcesses: Map<string, ChildProcess> = new Map();
   private mcpProcessReady: Map<string, boolean> = new Map();
+  private argumentHints: Record<string, Record<string, string>> = {};
 
-  constructor(config: MCPConfig, logger: winston.Logger) {
+  constructor(config: MCPConfig, logger: winston.Logger, argumentHints?: Record<string, Record<string, string>>) {
     this.config = config;
     this.logger = logger;
+    this.argumentHints = argumentHints || {};
   }
 
   get isInitialized(): boolean {
@@ -38,6 +40,46 @@ export class MCPManager {
 
   get toolCount(): number {
     return this.mcpToolSchemas.size;
+  }
+
+  private enhanceParameterWithHints(toolName: string, paramName: string, paramSchema: any): any {
+    const hint = this.argumentHints[toolName]?.[paramName];
+    if (hint && paramSchema.description) {
+      return {
+        ...paramSchema,
+        description: `${paramSchema.description}. HINT: ${hint}`
+      };
+    }
+    return paramSchema;
+  }
+
+  updateArgumentHints(newArgumentHints: Record<string, Record<string, string>> = {}): void {
+    this.argumentHints = newArgumentHints;
+    
+    // Re-enhance existing schemas with new hints
+    for (const [toolName, schema] of this.mcpToolSchemas.entries()) {
+      const originalProperties = schema.function.parameters.properties || {};
+      const enhancedProperties: Record<string, any> = {};
+      
+      for (const [paramName, paramSchema] of Object.entries(originalProperties)) {
+        // Remove old hint if it exists (crude but effective)
+        const cleanedSchema = { ...paramSchema };
+        if (cleanedSchema.description && cleanedSchema.description.includes('. HINT: ')) {
+          cleanedSchema.description = cleanedSchema.description.split('. HINT: ')[0];
+        }
+        
+        enhancedProperties[paramName] = this.enhanceParameterWithHints(
+          toolName,
+          paramName,
+          cleanedSchema
+        );
+      }
+
+      // Update the cached schema
+      schema.function.parameters.properties = enhancedProperties;
+    }
+    
+    this.logger.debug('Updated argument hints for existing schemas');
   }
 
   getAvailableTools(): string[] {
@@ -182,15 +224,32 @@ export class MCPManager {
                 // Tools list response - mark process as ready and resolve with schemas
                 const tools = response.result.tools || [];
                 for (const tool of tools) {
+                  const inputSchema = tool.inputSchema || {
+                    type: 'object',
+                    properties: {},
+                    required: [],
+                  };
+
+                  // Enhance parameter descriptions with hints
+                  const enhancedProperties: Record<string, any> = {};
+                  if (inputSchema.properties) {
+                    for (const [paramName, paramSchema] of Object.entries(inputSchema.properties)) {
+                      enhancedProperties[paramName] = this.enhanceParameterWithHints(
+                        tool.name,
+                        paramName,
+                        paramSchema
+                      );
+                    }
+                  }
+
                   schemas.push({
                     type: 'function',
                     function: {
                       name: tool.name,
                       description: tool.description,
-                      parameters: tool.inputSchema || {
-                        type: 'object',
-                        properties: {},
-                        required: [],
+                      parameters: {
+                        ...inputSchema,
+                        properties: enhancedProperties,
                       },
                     },
                   });
