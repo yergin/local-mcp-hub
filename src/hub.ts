@@ -714,6 +714,118 @@ class LocalMCPHub {
       res.json({ tools });
     });
 
+    // Get schemas for all MCP tools in OpenAI format
+    this.app.get('/v1/tools/schemas', (req, res) => {
+      try {
+        if (!this.mcpManager.isInitialized) {
+          return res.status(503).json({
+            error: 'Service unavailable',
+            message: 'MCP tools are still initializing',
+            isInitialized: false,
+            retryAfter: 5 // seconds
+          });
+        }
+
+        // Return the OpenAI-formatted tool schemas directly
+        const tools = this.mcpManager.getOpenAITools();
+        
+        res.json({
+          tools,
+          count: tools.length,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        logger.error('Error getting tool schemas:', error);
+        res.status(500).json({
+          error: 'Internal server error',
+          message: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    });
+
+    // Run a specific MCP tool using OpenAI function calling format
+    this.app.post('/v1/tools/run', async (req, res) => {
+      try {
+        // Support both OpenAI format and simplified format for backwards compatibility
+        let toolName: string;
+        let toolArgs: any;
+
+        if (req.body.type === 'function' && req.body.function) {
+          // OpenAI format
+          toolName = req.body.function.name;
+          // Parse arguments if they're a JSON string (OpenAI format)
+          if (typeof req.body.function.arguments === 'string') {
+            try {
+              toolArgs = JSON.parse(req.body.function.arguments);
+            } catch (e) {
+              return res.status(400).json({
+                error: 'Bad request',
+                message: 'Invalid JSON in function.arguments'
+              });
+            }
+          } else {
+            toolArgs = req.body.function.arguments || {};
+          }
+        } else if (req.body.tool_name) {
+          // Simplified format (backwards compatibility)
+          toolName = req.body.tool_name;
+          toolArgs = req.body.arguments || {};
+        } else {
+          return res.status(400).json({
+            error: 'Bad request',
+            message: 'Invalid request format. Use OpenAI function calling format or provide tool_name'
+          });
+        }
+
+        if (!toolName) {
+          return res.status(400).json({
+            error: 'Bad request',
+            message: 'Tool name is required'
+          });
+        }
+
+        if (!this.mcpManager.isInitialized) {
+          return res.status(503).json({
+            error: 'Service unavailable',
+            message: 'MCP tools are still initializing',
+            isInitialized: false,
+            retryAfter: 5
+          });
+        }
+
+        // Check if tool exists
+        const availableTools = this.mcpManager.getAvailableTools();
+        if (!availableTools.includes(toolName)) {
+          return res.status(404).json({
+            error: 'Tool not found',
+            message: `Tool "${toolName}" does not exist`,
+            availableTools
+          });
+        }
+
+        logger.info(`Running MCP tool: ${toolName}`, { args: toolArgs });
+
+        // Execute the tool
+        const startTime = Date.now();
+        const result = await this.mcpManager.callMCPTool(toolName, toolArgs);
+        const duration = Date.now() - startTime;
+
+        res.json({
+          success: true,
+          tool_name: toolName,
+          result,
+          duration: `${duration}ms`,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        logger.error('Error running MCP tool:', error);
+        res.status(500).json({
+          error: 'Tool execution failed',
+          message: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    });
+
     // Models endpoint
     this.app.get('/v1/models', (req, res) => {
       res.json({

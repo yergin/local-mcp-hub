@@ -499,13 +499,15 @@ As was previously identified, the fast model generated regex pattern ".*" instea
 
 ## 3.2 Plan Decision Prompt to Full Model
 
-Given that the LLM did notice the file listing in the context (as it was able to deduce that it's a TypeScript or Javascript project), it must have intended to do a recursive search but did not specify this in the tool prompt so the tool only looked for *.ts and *.js files in the root folder.
-
-We clearly need to help out the fast and full LLMs with hints on how to prompt for file searches and how the arguments work.
+The plan decision prompt is missing the tools list with USE WHEN hints.
 
 ## 3.3 Full Model Response (Plan Generation)
 
-The LLM probably should have included the file listing in its conclusion as it could be helpful for future searches.
+The full model did notice the file listing in the context (as it was able to deduce that it's a TypeScript or Javascript project), it must have intended to do a recursive search for *.ts and *.js files but didn't realise that both patterns could not be searched at the same time. Also the tool prompt looked like final arguments which the fast model just ran with. The Plan Decision Prompt needs clearly state that the tool prompt is to be worded as a sentence.
+
+We clearly need to help out the fast and full LLMs with hints on how to prompt for file searches and how the arguments work.
+
+Perhaps we should always provide the full and fast models with a list of all files and folders up to 1 directory deep as context to it avoid the first few file searches.
 
 ## 4.3 Plan Iteration 1: LLM Decision After First Tool Call
 
@@ -574,17 +576,20 @@ This is essentially the data in "4.1 Plan Execution State Initialization" descri
     "next_steps": [
       "Analyze the identified files to understand their roles and interactions within the codebase.",
       "Review configuration files for settings that impact data flows and module interactions."
+    ],
+    "available_tools": [
+      ...
     ]
   }
   ```
 
 Other points:
+- tools and USE_WHEN hints were missing.
 - `notes` in `current_step` should not be included if they are not needed.
 - Snake case should be used for all JSON variables for consistency.
 - Previous steps are not displayed in JSON format but the current step is. I would display all of the above info either in JSON or as formatted text.
 
-
-The LLM responded with:
+The full model responded with:
 
 ```
   "current_step": {
@@ -605,5 +610,38 @@ The LLM responded with:
 
 ## 4.4 Step Execution 2: Find JSX/TSX Files
 
-As pointed out, the wrong tool arguments were used.
+Luckily, the fast model seemed to realise that it couldn't specify two file filters at once and opted for finding all files.
 
+### 4.5 Plan Iteration 2
+
+The model hallucinated a tool called `review_code` but this is because it was never provided a list of available tools in the first place.
+
+### 4.7 Plan Iteration 3
+
+It probably meant to ask for an recursive search here. Again, it would help to have a more complete list of files to begin with.
+
+### 4.9 Plan Iteration 4
+
+The model start going in a loop because it was unable to use the tools correctly.
+
+Actions
+=======
+
+1. Fix JSON snake_case.
+2. Add tools list and USE WHEN hints to the Plan Decision prompt.
+3. Fix Plan Iteration prompt context also including the tools with USE WHEN hints here.
+4. Emphasize in find_file USE_WHEN prompt that the search is recursive and only one file pattern can be searched for at a time.
+4. Emphasize in list_dir USE_WHEN prompt that instructions should explicitly state whether or not to do a recursive search.
+5. Always include a list of files and folders one directory deep as a system context to prompts.
+6. Add an `argumentHints` section to `toolGuidance` which are hints that get appended to the argument's description for the argument building phases. Add the following hint:
+
+  ```
+  "toolGuidance": {
+    ...
+    "argumentHints": {
+      "find_file": {
+        "file_mask": "Do not use a regex type of expression."
+      }
+    }
+  }
+  ```
