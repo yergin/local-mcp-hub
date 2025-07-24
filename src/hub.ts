@@ -144,7 +144,8 @@ class LocalMCPHub {
     this.mcpManager = new MCPManager(
       this.config.mcps, 
       logger, 
-      this.prompts.toolGuidance?.argumentHints
+      this.prompts.toolGuidance?.argumentHints,
+      this.prompts.toolGuidance?.usageHints
     );
     this.toolSelector = new ToolSelector(
       this.ollamaClient,
@@ -416,9 +417,7 @@ class LocalMCPHub {
 
         if (hasToolResults) {
           // Generate final response using tool results
-          const mcpTools = this.mcpManager
-            .getOpenAITools()
-            .map(tool => this.toolSelector.enhanceToolWithUsageGuidance(tool));
+          const mcpTools = this.mcpManager.getOpenAITools();
           
           const systemContext = await this.getSystemContext();
           
@@ -447,9 +446,7 @@ class LocalMCPHub {
 
         // Always inject our MCP tools
         const toolsStartTime = Date.now();
-        const mcpTools = this.mcpManager
-          .getOpenAITools()
-          .map(tool => this.toolSelector.enhanceToolWithUsageGuidance(tool));
+        const mcpTools = this.mcpManager.getOpenAITools();
         logTiming('MCP tools retrieval', toolsStartTime, { toolCount: mcpTools.length });
         logger.debug('Available MCP tools', {
           tools: mcpTools.map((t: OpenAITool) => t.function.name),
@@ -928,8 +925,11 @@ class LocalMCPHub {
           this.prompts.systemMessages || {}
         );
 
-        // Update MCP Manager with new argument hints (without rebuilding schemas)
-        this.mcpManager.updateArgumentHints(this.prompts.toolGuidance?.argumentHints);
+        // Update MCP Manager with new argument and usage hints
+        this.mcpManager.updateHints(
+          this.prompts.toolGuidance?.argumentHints,
+          this.prompts.toolGuidance?.usageHints
+        );
         
         logger.info('Prompts configuration reloaded successfully');
         res.json({
@@ -1177,9 +1177,7 @@ class LocalMCPHub {
         const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
 
         // Get tools with usage hints for the prompt
-        const iterationMcpTools = this.mcpManager
-          .getOpenAITools()
-          .map(tool => this.toolSelector.enhanceToolWithUsageGuidance(tool));
+        const iterationMcpTools = this.mcpManager.getOpenAITools();
         const toolNamesAndHints = this.toolSelector.formatToolsWithUsageHints(iterationMcpTools);
 
         // Get refreshed system context for plan iteration (files may have changed)

@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import winston from 'winston';
 import path from 'path';
+import fs from 'fs';
 
 export interface OpenAITool {
   type: 'function';
@@ -25,16 +26,71 @@ export class MCPManager {
   private logger: winston.Logger;
   private config: MCPConfig;
   private mcpToolSchemas: Map<string, OpenAITool> = new Map();
+  private baseToolSchemas: Map<string, OpenAITool> = new Map(); // Store clean base schemas
   private initializationComplete: boolean = false;
   private mcpProcesses: Map<string, ChildProcess> = new Map();
   private mcpProcessReady: Map<string, boolean> = new Map();
   private mcpInitializationStatus: Map<string, 'pending' | 'success' | 'failed'> = new Map();
   private argumentHints: Record<string, Record<string, string>> = {};
+  private usageHints: Record<string, string> = {}; // Store usage hints separately
 
-  constructor(config: MCPConfig, logger: winston.Logger, argumentHints?: Record<string, Record<string, string>>) {
+  constructor(
+    config: MCPConfig, 
+    logger: winston.Logger, 
+    argumentHints?: Record<string, Record<string, string>>,
+    usageHints?: Record<string, string>
+  ) {
     this.config = config;
     this.logger = logger;
     this.argumentHints = argumentHints || {};
+    this.usageHints = usageHints || {};
+    this.initializeBuiltInTools();
+  }
+
+  private initializeBuiltInTools(): void {
+    // Add read_file built-in tool
+    const properties: Record<string, any> = {
+      file_path: {
+        type: 'string',
+        description: 'The relative path to the file to read (e.g., "src/hub.ts", "config.json")'
+      },
+      max_lines: {
+        type: 'number',
+        description: 'Maximum number of lines to read (default: unlimited)'
+      },
+      start_line: {
+        type: 'number',
+        description: 'Line number to start reading from (1-based, default: 1)'
+      }
+    };
+
+    // Apply hints if already available
+    const enhancedProperties: Record<string, any> = {};
+    for (const [paramName, paramSchema] of Object.entries(properties)) {
+      enhancedProperties[paramName] = this.enhanceParameterWithHints(
+        'read_file',
+        paramName,
+        paramSchema
+      );
+    }
+
+    const readFileSchema: OpenAITool = {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Reads the contents of a file from the filesystem. Use this tool to examine file contents directly.',
+        parameters: {
+          type: 'object',
+          properties: enhancedProperties,
+          required: ['file_path']
+        }
+      }
+    };
+
+    // Store base schema and create enhanced version
+    this.baseToolSchemas.set('read_file', readFileSchema);
+    this.mcpToolSchemas.set('read_file', this.enhanceSchema(readFileSchema));
+    this.logger.info('Built-in tools initialized: read_file');
   }
 
   get isInitialized(): boolean {
@@ -79,33 +135,62 @@ export class MCPManager {
     return paramSchema;
   }
 
-  updateArgumentHints(newArgumentHints: Record<string, Record<string, string>> = {}): void {
-    this.argumentHints = newArgumentHints;
+  private enhanceSchema(baseSchema: OpenAITool): OpenAITool {
+    const toolName = baseSchema.function.name;
     
-    // Re-enhance existing schemas with new hints
-    for (const [toolName, schema] of this.mcpToolSchemas.entries()) {
-      const originalProperties = schema.function.parameters.properties || {};
-      const enhancedProperties: Record<string, any> = {};
-      
-      for (const [paramName, paramSchema] of Object.entries(originalProperties)) {
-        // Remove old hint if it exists (crude but effective)
-        const cleanedSchema = { ...paramSchema };
-        if (cleanedSchema.description && cleanedSchema.description.includes('. HINT: ')) {
-          cleanedSchema.description = cleanedSchema.description.split('. HINT: ')[0];
-        }
-        
-        enhancedProperties[paramName] = this.enhanceParameterWithHints(
-          toolName,
-          paramName,
-          cleanedSchema
-        );
-      }
-
-      // Update the cached schema
-      schema.function.parameters.properties = enhancedProperties;
+    // First, enhance parameter descriptions with argument hints
+    const enhancedProperties: Record<string, any> = {};
+    const properties = baseSchema.function.parameters.properties || {};
+    
+    for (const [paramName, paramSchema] of Object.entries(properties)) {
+      enhancedProperties[paramName] = this.enhanceParameterWithHints(
+        toolName,
+        paramName,
+        paramSchema
+      );
     }
     
-    this.logger.debug('Updated argument hints for existing schemas');
+    // Then, enhance the tool description with usage hints
+    let enhancedDescription = baseSchema.function.description;
+    const usageHint = this.usageHints[toolName];
+    if (usageHint) {
+      enhancedDescription = `${enhancedDescription}. ${usageHint}`;
+    }
+    
+    return {
+      ...baseSchema,
+      function: {
+        ...baseSchema.function,
+        description: enhancedDescription,
+        parameters: {
+          ...baseSchema.function.parameters,
+          properties: enhancedProperties
+        }
+      }
+    };
+  }
+
+  updateHints(
+    newArgumentHints: Record<string, Record<string, string>> = {},
+    newUsageHints: Record<string, string> = {}
+  ): void {
+    this.argumentHints = newArgumentHints;
+    this.usageHints = newUsageHints;
+    
+    // Clear the enhanced schemas cache to force re-enhancement
+    this.mcpToolSchemas.clear();
+    
+    // Re-enhance all base schemas with new hints
+    for (const [toolName, baseSchema] of this.baseToolSchemas.entries()) {
+      const enhancedSchema = this.enhanceSchema(baseSchema);
+      this.mcpToolSchemas.set(toolName, enhancedSchema);
+    }
+    
+    this.logger.debug('Updated all hints and re-enhanced schemas', {
+      argumentHints: Object.keys(this.argumentHints).length,
+      usageHints: Object.keys(this.usageHints).length,
+      schemas: this.mcpToolSchemas.size
+    });
   }
 
   getAvailableTools(): string[] {
@@ -149,9 +234,10 @@ export class MCPManager {
         this.logger.info(`Starting initialization of ${mcpName}...`);
         const schemas = await this.getMCPToolSchemas(mcpName);
         
-        // Add schemas to the global map
+        // Add schemas to both base and enhanced maps
         schemas.forEach(schema => {
-          this.mcpToolSchemas.set(schema.function.name, schema);
+          this.baseToolSchemas.set(schema.function.name, schema);
+          this.mcpToolSchemas.set(schema.function.name, this.enhanceSchema(schema));
         });
         
         this.mcpInitializationStatus.set(mcpName, 'success');
@@ -309,27 +395,13 @@ export class MCPManager {
                     required: [],
                   };
 
-                  // Enhance parameter descriptions with hints
-                  const enhancedProperties: Record<string, any> = {};
-                  if (inputSchema.properties) {
-                    for (const [paramName, paramSchema] of Object.entries(inputSchema.properties)) {
-                      enhancedProperties[paramName] = this.enhanceParameterWithHints(
-                        tool.name,
-                        paramName,
-                        paramSchema
-                      );
-                    }
-                  }
-
+                  // Create base schema without any enhancements
                   schemas.push({
                     type: 'function',
                     function: {
                       name: tool.name,
                       description: tool.description,
-                      parameters: {
-                        ...inputSchema,
-                        properties: enhancedProperties,
-                      },
+                      parameters: inputSchema,
                     },
                   });
                 }
@@ -440,6 +512,11 @@ export class MCPManager {
 
   async callMCPTool(toolName: string, args: any = {}): Promise<string> {
     const startTime = Date.now();
+
+    // Handle built-in tools first
+    if (toolName === 'read_file') {
+      return this.handleBuiltInTool(toolName, args);
+    }
 
     // Determine which MCP server to use based on tool name
     let mcpName: string;
@@ -590,6 +667,72 @@ export class MCPManager {
         originalCleanup();
       };
     });
+  }
+
+  private async handleBuiltInTool(toolName: string, args: any): Promise<string> {
+    this.logger.debug(`Executing built-in tool: ${toolName}`, { args });
+
+    try {
+      switch (toolName) {
+        case 'read_file':
+          return this.handleReadFile(args);
+        default:
+          return `Error: Unknown built-in tool: ${toolName}`;
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Built-in tool ${toolName} failed:`, error);
+      return `Error: ${errorMessage}`;
+    }
+  }
+
+  private async handleReadFile(args: any): Promise<string> {
+    const { file_path, max_lines, start_line = 1 } = args;
+
+    if (!file_path) {
+      throw new Error('file_path is required for read_file tool');
+    }
+
+    try {
+      // Check if path exists and is a file
+      const stats = fs.statSync(file_path);
+      if (stats.isDirectory()) {
+        throw new Error(`Path '${file_path}' is a directory. Use list_dir tool to list directory contents instead.`);
+      }
+
+      // Read the file
+      const fileContent = fs.readFileSync(file_path, 'utf-8');
+      const lines = fileContent.split('\n');
+
+      // Apply line filtering if specified
+      let filteredLines = lines;
+      if (start_line > 1) {
+        filteredLines = lines.slice(start_line - 1);
+      }
+      if (max_lines && max_lines > 0) {
+        filteredLines = filteredLines.slice(0, max_lines);
+      }
+
+      // Return the result in a format similar to other tools
+      const result = {
+        file_path,
+        content: filteredLines.join('\n'),
+        total_lines: lines.length,
+        lines_returned: filteredLines.length,
+        start_line: start_line
+      };
+
+      this.logger.debug('read_file completed', { 
+        path: file_path, 
+        totalLines: lines.length, 
+        linesReturned: filteredLines.length 
+      });
+
+      return JSON.stringify(result);
+    } catch (error) {
+      this.logger.error(`Error reading file ${file_path}:`, error);
+      throw new Error(`Failed to read file: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   cleanup(): void {
