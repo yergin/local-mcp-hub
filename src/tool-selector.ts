@@ -6,6 +6,7 @@ export interface ToolGuidanceConfig {
   usageHints?: Record<string, string>;
   fastModelTools?: string[];
   readOnlyTools?: string[];
+  toolsBlackList?: string[];
 }
 
 export interface ToolSelectionConfig {
@@ -121,7 +122,11 @@ export class ToolSelector {
   }
 
   formatToolsWithUsageHints(tools: OpenAITool[]): string {
-    return tools
+    // Filter out blacklisted tools
+    const blacklist = this.toolGuidance.toolsBlackList || [];
+    const filteredTools = tools.filter(tool => !blacklist.includes(tool.function.name));
+    
+    return filteredTools
       .map(tool => {
         const normalizedName = tool.function.name.replace(/-/g, '_');
         const guidance = this.getToolUsageGuidance(tool.function.name);
@@ -144,9 +149,12 @@ export class ToolSelector {
     this.logger.debug(`DEBUG: User request: "${userRequest}"`);
     this.logger.debug(`DEBUG: Number of tools: ${tools.length}`);
 
-    // Stage 1: Select only from read-only tools for information gathering
+    // Stage 1: Select only from read-only tools for information gathering, excluding blacklisted tools
     const readOnlyToolNames = this.toolGuidance.readOnlyTools || [];
-    const readOnlyTools = tools.filter(tool => readOnlyToolNames.includes(tool.function.name));
+    const blacklist = this.toolGuidance.toolsBlackList || [];
+    const readOnlyTools = tools.filter(tool => 
+      readOnlyToolNames.includes(tool.function.name) && !blacklist.includes(tool.function.name)
+    );
     
     this.logger.debug(`DEBUG: Filtered to ${readOnlyTools.length} read-only tools from ${tools.length} total tools`);
     

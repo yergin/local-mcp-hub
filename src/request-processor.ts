@@ -49,11 +49,19 @@ export interface NextStepResponse {
   prompt: string;
 }
 
+// Tool Call Record - for tracking individual tool calls within a step
+export interface ToolCallRecord {
+  prompt: string;
+  tool: string;
+  args: string; // JSON stringified
+}
+
 // Completed Step Request Type - for tracking completed steps in prompts
 export interface CompletedStepRequest {
   objective: string;
   success: boolean;
   conclusion: string;
+  toolCalls: ToolCallRecord[]; // List of all tool calls made during this step
 }
 
 // Current Step Request Type - for providing current step context in prompts
@@ -85,6 +93,7 @@ export interface PlanExecutionState {
   currentStep?: NextStepResponse;
   currentStepNotes?: string; // notes_to_future_self from previous iterations
   currentStepAssistant?: AssistantToolResult; // current tool result for current step
+  currentStepToolCalls: ToolCallRecord[]; // track all tool calls for current step
   laterSteps: string[];
   stepResults: string[];
 }
@@ -94,6 +103,8 @@ export interface ResponseGenerationConfig {
   planIteration?: { template?: string };
   finalIteration?: { template?: string };
   planDecisionAssistant?: { template?: string };
+  previousTool?: { template?: string };
+  previousStep?: { template?: string };
 }
 
 export interface SystemMessageConfig {
@@ -153,6 +164,54 @@ export class RequestProcessor {
    */
   formatToolResultsAsBlockQuote(results: string): string {
     return results.split('\n').map(line => `> ${line}`).join('\n');
+  }
+
+  /**
+   * Format completed steps using previousTool and previousStep templates
+   * @param completedSteps Array of completed steps with tool calls
+   * @returns Formatted string of all completed steps
+   */
+  formatCompletedStepsWithTemplates(completedSteps: CompletedStepRequest[]): string {
+    if (completedSteps.length === 0) {
+      return 'None';
+    }
+
+    const previousToolTemplate = this.responseConfig.previousTool?.template || 
+      `- Prompt to junior assistant: {prompt}
+  - Tool you chose: {tool}
+  - Tool arguments junior assistant chose: {args}`;
+
+    const previousStepTemplate = this.responseConfig.previousStep?.template || 
+      `### {objective}
+Success: {success}
+
+####Junior Assistant Tasks
+{previousToolList}
+
+####Conclusion
+{conclusion}`;
+
+    return completedSteps.map((step, i) => {
+      // Format all tool calls for this step
+      const previousToolList = step.toolCalls.map(toolCall => {
+        const toolVariables: Record<string, string> = {
+          prompt: toolCall.prompt,
+          tool: toolCall.tool,
+          args: toolCall.args
+        };
+        return this.replaceTemplateVariables(previousToolTemplate, toolVariables);
+      }).join('\n');
+
+      // Format the step using previousStep template
+      const stepVariables: Record<string, string> = {
+        objective: step.objective,
+        success: step.success ? 'Yes' : 'No',
+        previousToolList: previousToolList,
+        conclusion: step.conclusion
+      };
+
+      return this.replaceTemplateVariables(previousStepTemplate, stepVariables);
+    }).join('\n\n');
   }
 
   convertMessagesToPrompt(messages: any[], projectFileStructure?: string): string {

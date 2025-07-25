@@ -42,6 +42,7 @@ interface PromptsConfig {
     usageHints?: Record<string, string>;
     fastModelTools?: string[];
     safeTools?: string[];
+    toolsBlackList?: string[];
     argumentHints?: Record<string, Record<string, string>>;
   };
   responseGeneration?: {
@@ -50,6 +51,8 @@ interface PromptsConfig {
     finalIteration?: { template?: string };
     currentStep?: { template?: string };
     planDecisionAssistant?: { template?: string };
+    previousTool?: { template?: string };
+    previousStep?: { template?: string };
   };
   systemMessages?: {
     customSystemPrompt?: { template?: string; enabled?: boolean };
@@ -1009,10 +1012,23 @@ class LocalMCPHub {
     // Create initial completed step from assistant data evaluation
     const initialCompletedSteps: CompletedStepRequest[] = [];
     if (currentPlan.conclusion_from_junior_assistant_data || currentPlan.junior_assistant_data_was_helpful !== undefined) {
+      // Extract tool call information from the initial tool result
+      const initialToolCall = originalMessages.find((msg: any) => msg.role === 'assistant' && typeof msg.content === 'object' && msg.content.tool);
+      const toolCalls = [];
+      if (initialToolCall) {
+        const assistantResult = initialToolCall.content as any;
+        toolCalls.push({
+          prompt: assistantResult.prompt,
+          tool: assistantResult.tool,
+          args: assistantResult.args
+        });
+      }
+
       initialCompletedSteps.push({
         objective: "Assistant gathers initial information",
         success: currentPlan.junior_assistant_data_was_helpful || false,
-        conclusion: currentPlan.conclusion_from_junior_assistant_data || "No conclusion provided from assistant data"
+        conclusion: currentPlan.conclusion_from_junior_assistant_data || "No conclusion provided from assistant data",
+        toolCalls: toolCalls
       });
     }
     
@@ -1022,6 +1038,7 @@ class LocalMCPHub {
       currentStep: currentPlan.next_step,
       currentStepNotes: undefined,
       currentStepAssistant: undefined,
+      currentStepToolCalls: [],
       laterSteps: currentPlan.later_steps || [],
       stepResults: []
     };
@@ -1081,6 +1098,13 @@ class LocalMCPHub {
             args: JSON.stringify({}),
             results: toolResult
           };
+
+          // Add tool call to current step's tool call history
+          executionState.currentStepToolCalls.push({
+            prompt: executionState.currentStep!.prompt,
+            tool: executionState.currentStep!.tool,
+            args: JSON.stringify({})
+          });
           
           logger.debug('PLAN STEP ERROR TREATED AS RESULT', {
             errorResult: toolResult
@@ -1149,6 +1173,13 @@ class LocalMCPHub {
               results: toolResult
             };
 
+            // Add tool call to current step's tool call history
+            executionState.currentStepToolCalls.push({
+              prompt: executionState.currentStep!.prompt,
+              tool: executionState.currentStep!.tool,
+              args: JSON.stringify(actualArgs)
+            });
+
             logger.debug('PLAN STEP TOOL EXECUTION RESULT', {
               tool: executionState.currentStep!.tool,
               resultLength: toolResult.length,
@@ -1166,6 +1197,13 @@ class LocalMCPHub {
               args: JSON.stringify({}),
               results: toolResult
             };
+
+            // Add tool call to current step's tool call history
+            executionState.currentStepToolCalls.push({
+              prompt: executionState.currentStep!.prompt,
+              tool: executionState.currentStep!.tool,
+              args: JSON.stringify({})
+            });
             
             logger.debug('PLAN STEP EXECUTION ERROR TREATED AS RESULT', {
               errorResult: toolResult,
@@ -1193,15 +1231,11 @@ class LocalMCPHub {
         const projectFileStructure = await this.getProjectFileStructure(true); // Force refresh
 
         // Create prompt for plan iteration using the new template format
-        const completedStepsText = executionState.completedSteps.length > 0 
-          ? executionState.completedSteps.map((step, i) => 
-              `${i+1}. Objective: "${step.objective}"\n   Success: ${step.success}\n   Conclusion: "${step.conclusion}"`
-            ).join('\n')
-          : 'None';
+        const completedStepsText = this.requestProcessor.formatCompletedStepsWithTemplates(executionState.completedSteps);
         
         // Format next steps
         const nextStepsText = executionState.laterSteps.length > 0
-          ? executionState.laterSteps.map((step, i) => `${i+1}. ${step}`).join('\n')
+          ? executionState.laterSteps.map((step) => `- ${step}`).join('\n')
           : 'None';
         
         // Build structured CurrentStepRequest object according to specification
@@ -1348,7 +1382,8 @@ class LocalMCPHub {
             const completedStep: CompletedStepRequest = {
               objective: executionState.currentStep.objective,
               success: stepCompleteResponse.current_step.success,
-              conclusion: stepCompleteResponse.current_step.notes_to_future_self
+              conclusion: stepCompleteResponse.current_step.notes_to_future_self,
+              toolCalls: executionState.currentStepToolCalls
             };
             executionState.completedSteps.push(completedStep);
           }
@@ -1361,6 +1396,7 @@ class LocalMCPHub {
           };
           executionState.currentStepNotes = undefined; // Reset notes for new step
           executionState.currentStepAssistant = undefined; // Reset assistant data for new step
+          executionState.currentStepToolCalls = []; // Reset tool calls for new step
           
           // Stream step completion
           this.requestProcessor.streamStepCompletion(
