@@ -125,7 +125,7 @@ export class MCPManager {
   }
 
   private enhanceParameterWithHints(toolName: string, paramName: string, paramSchema: any): any {
-    const hint = this.argumentHints[toolName]?.[paramName];
+    const hint = this.argumentHints[toolName]?.[paramName] || this.argumentHints['*']?.[paramName];
     if (hint && paramSchema.description) {
       return {
         ...paramSchema,
@@ -713,22 +713,16 @@ export class MCPManager {
         filteredLines = filteredLines.slice(0, max_lines);
       }
 
-      // Return the result in a format similar to other tools
-      const result = {
-        file_path,
-        content: filteredLines.join('\n'),
-        total_lines: lines.length,
-        lines_returned: filteredLines.length,
-        start_line: start_line
-      };
-
+      // Log metadata for debugging but only return the content
       this.logger.debug('read_file completed', { 
         path: file_path, 
         totalLines: lines.length, 
-        linesReturned: filteredLines.length 
+        linesReturned: filteredLines.length,
+        startLine: start_line
       });
 
-      return JSON.stringify(result);
+      // Return only the file content, not wrapped in JSON
+      return filteredLines.join('\n');
     } catch (error) {
       this.logger.error(`Error reading file ${file_path}:`, error);
       throw new Error(`Failed to read file: ${error instanceof Error ? error.message : 'Unknown error'}`);

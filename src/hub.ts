@@ -45,7 +45,6 @@ interface PromptsConfig {
     argumentHints?: Record<string, Record<string, string>>;
   };
   responseGeneration?: {
-    toolResultsStreaming?: { template?: string };
     planDecision?: { template?: string };
     planIteration?: { template?: string };
     finalIteration?: { template?: string };
@@ -582,12 +581,14 @@ class LocalMCPHub {
               // Ask for permission for potentially unsafe tools
               logger.info(`Asking permission for potentially unsafe tool: ${toolSelection.tool}`);
 
-              const permissionMessage = this.prompts
-                .systemMessages!.toolPermissionRequest!.template!.replace(
-                  '{toolName}',
-                  toolSelection.tool
-                )
-                .replace('{args}', JSON.stringify(toolSelection.args));
+              const permissionTemplateVariables: Record<string, string> = {
+                toolName: toolSelection.tool,
+                args: JSON.stringify(toolSelection.args)
+              };
+              const permissionMessage = this.requestProcessor.replaceTemplateVariables(
+                this.prompts.systemMessages!.toolPermissionRequest!.template!,
+                permissionTemplateVariables
+              );
 
               this.requestProcessor.sendStreamingResponse(
                 res,
@@ -675,10 +676,12 @@ class LocalMCPHub {
 
         // Create context-aware completion prompt using template
         const completionTemplate = this.prompts.codeCompletion.completion.template!;
-        const completionPrompt = completionTemplate
-          .replace('{filePath}', languageContext.replace('// Path: ', ''))
-          .replace(/\{codeBeforeCursor\}/g, codeBeforeCursor)
-          .replace(/\{codeSuffix\}/g, fimRequest.suffix);
+        const templateVariables: Record<string, string> = {
+          filePath: languageContext.replace('// Path: ', ''),
+          codeBeforeCursor: codeBeforeCursor,
+          codeSuffix: fimRequest.suffix
+        };
+        const completionPrompt = this.requestProcessor.replaceTemplateVariables(completionTemplate, templateVariables);
 
         // Debug logging: Code completion prompt construction
         logger.debug('CODE COMPLETION PROMPT', {
@@ -1098,17 +1101,21 @@ class LocalMCPHub {
             const userRequest = executionState.currentStep!.prompt;
             const isSimpleArg = this.toolSelector.isSimpleArgumentGeneration(executionState.currentStep!.tool);
             
+            // Get system context for argument generation (same as used for initial tool selection)
+            const systemContext = await this.getSystemContext();
+            
             logger.debug('PLAN STEP ARG STRATEGY', {
               tool: executionState.currentStep!.tool,
               isSimpleArg: isSimpleArg,
-              userRequest: userRequest
+              userRequest: userRequest,
+              hasSystemContext: !!systemContext
             });
 
             let toolArgs;
             if (isSimpleArg) {
-              toolArgs = await this.toolSelector.generateArgsWithFastModel(userRequest, currentTool);
+              toolArgs = await this.toolSelector.generateArgsWithFastModel(userRequest, currentTool, systemContext);
             } else {
-              toolArgs = await this.toolSelector.generateArgsWithFullModel(userRequest, currentTool);
+              toolArgs = await this.toolSelector.generateArgsWithFullModel(userRequest, currentTool, systemContext);
             }
 
             logger.debug('PLAN STEP GENERATED ARGS', {
@@ -1222,21 +1229,40 @@ ${notesLine}   Completed Assistant Task:
         
         // Use finalIteration template if this is the last iteration
         let planIterationPrompt: string;
+        const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
+        
         if (iterationCount >= maxIterations) {
-          planIterationPrompt = this.prompts.responseGeneration!.finalIteration!.template!
-            .replace('{objective}', executionState.objective)
-            .replace('{completedSteps}', completedStepsText)
-            .replace('{currentStepStatus}', currentStepText);
+          // Prepare template variables for final iteration
+          const templateVariables: Record<string, string> = {
+            systemPrompt: systemPrompt,
+            systemContext: systemContext,
+            userPrompt: userPrompt,
+            objective: executionState.objective,
+            completedSteps: completedStepsText,
+            currentStepStatus: currentStepText
+          };
+          
+          planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
+            this.prompts.responseGeneration!.finalIteration!.template!,
+            templateVariables
+          );
         } else {
-          const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
-          planIterationPrompt = this.prompts.responseGeneration!.planIteration!.template!
-            .replace('{systemPrompt}', systemPrompt)
-            .replace('{userPrompt}', userPrompt)
-            .replace('{objective}', executionState.objective)
-            .replace('{completedSteps}', completedStepsText)
-            .replace('{currentStep}', currentStepText)
-            .replace('{nextSteps}', nextStepsText)
-            .replace('{toolNamesAndHints}', toolNamesAndHints);
+          // Prepare template variables for regular iteration
+          const templateVariables: Record<string, string> = {
+            systemPrompt: systemPrompt,
+            systemContext: systemContext,
+            userPrompt: userPrompt,
+            objective: executionState.objective,
+            completedSteps: completedStepsText,
+            currentStep: currentStepText,
+            nextSteps: nextStepsText,
+            toolNamesAndHints: toolNamesAndHints
+          };
+          
+          planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
+            this.prompts.responseGeneration!.planIteration!.template!,
+            templateVariables
+          );
         }
 
         logger.debug('PLAN ITERATION PROMPT', {
@@ -1255,10 +1281,7 @@ ${notesLine}   Completed Assistant Task:
           maxTokens: maxTokens
         });
 
-        // Add system context to plan iteration prompt
-        const fullPlanIterationPrompt = `${systemContext}\n\n${planIterationPrompt}`;
-        
-        const response = await this.ollamaClient.sendToOllama(fullPlanIterationPrompt, temperature, maxTokens);
+        const response = await this.ollamaClient.sendToOllama(planIterationPrompt, temperature, maxTokens);
 
         logger.debug('PLAN ITERATION OLLAMA RESPONSE', {
           responseLength: response.length,

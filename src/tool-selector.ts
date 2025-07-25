@@ -56,6 +56,25 @@ export class ToolSelector {
     this.logger = logger;
   }
 
+  /**
+   * Generic method to replace variables in a template string
+   * @param template The template string containing variables like {variableName}
+   * @param variables Object containing variable names and their replacement values
+   * @returns The template with all variables replaced
+   */
+  private replaceTemplateVariables(template: string, variables: Record<string, string>): string {
+    let result = template;
+    
+    // Replace each variable in the template
+    for (const [key, value] of Object.entries(variables)) {
+      const placeholder = `{${key}}`;
+      // Use global replace to handle multiple occurrences
+      result = result.split(placeholder).join(value || '');
+    }
+    
+    return result;
+  }
+
   updateConfig(
     toolGuidance: ToolGuidanceConfig,
     toolSelectionConfig: ToolSelectionConfig,
@@ -141,10 +160,12 @@ export class ToolSelector {
     const toolNames = this.formatToolsWithUsageHints(readOnlyTools);
 
     const toolSelectionTemplate = this.toolSelectionConfig.stage1.template;
-    const toolSelectionPrompt = toolSelectionTemplate
-      .replace('{userRequest}', userRequest)
-      .replace('{systemContext}', systemContext || 'System context not available')
-      .replace('{toolNames}', toolNames);
+    const templateVariables: Record<string, string> = {
+      userRequest: userRequest,
+      systemContext: systemContext || 'System context not available',
+      toolNames: toolNames
+    };
+    const toolSelectionPrompt = this.replaceTemplateVariables(toolSelectionTemplate, templateVariables);
 
     this.logger.debug(`DEBUG: Stage 1 prompt length: ${toolSelectionPrompt.length} chars`);
     this.logger.debug(`DEBUG: Full Stage 1 prompt:\n${toolSelectionPrompt}`);
@@ -232,20 +253,26 @@ export class ToolSelector {
     toolSchema: OpenAITool,
     systemContext?: string
   ): Promise<any> {
+    const requiredParams = toolSchema.function.parameters.required || [];
     const params = Object.entries(toolSchema.function.parameters.properties || {})
       .map(
-        ([name, schema]: [string, any]) =>
-          `- ${name} (${schema.type}): ${schema.description || 'No description'}`
+        ([name, schema]: [string, any]) => {
+          const isRequired = requiredParams.includes(name);
+          const typeInfo = isRequired ? schema.type : `${schema.type}, optional`;
+          return `- ${name} (${typeInfo}): ${schema.description || 'No description'}`;
+        }
       )
       .join('\n');
 
     // Use configured prompt template for fast model
     const fastArgsTemplate = this.argumentGenerationConfig.fastModel.template;
-    const argsPrompt = fastArgsTemplate
-      .replace('{systemContext}', systemContext || 'Project structure not available')
-      .replace('{toolName}', toolSchema.function.name)
-      .replace('{userRequest}', userRequest)
-      .replace('{params}', params);
+    const templateVariables: Record<string, string> = {
+      systemContext: systemContext || 'Project structure not available',
+      toolName: toolSchema.function.name,
+      userRequest: userRequest,
+      params: params
+    };
+    const argsPrompt = this.replaceTemplateVariables(fastArgsTemplate, templateVariables);
 
     this.logger.debug(`DEBUG: Fast model Stage 2 prompt length: ${argsPrompt.length} chars`);
 
@@ -279,21 +306,27 @@ export class ToolSelector {
     toolSchema: OpenAITool,
     systemContext?: string
   ): Promise<any> {
+    const requiredParams = toolSchema.function.parameters.required || [];
     const params = Object.entries(toolSchema.function.parameters.properties || {})
       .map(
-        ([name, schema]: [string, any]) =>
-          `- ${name} (${schema.type}): ${schema.description || 'No description'}`
+        ([name, schema]: [string, any]) => {
+          const isRequired = requiredParams.includes(name);
+          const typeInfo = isRequired ? schema.type : `${schema.type}, optional`;
+          return `- ${name} (${typeInfo}): ${schema.description || 'No description'}`;
+        }
       )
       .join('\n');
 
     // Use configured prompt template for full model
     const fullArgsTemplate = this.argumentGenerationConfig.fullModel.template;
-    const argsPrompt = fullArgsTemplate
-      .replace('{systemContext}', systemContext || 'Project structure not available')
-      .replace('{userRequest}', userRequest)
-      .replace('{toolName}', toolSchema.function.name)
-      .replace('{toolDescription}', toolSchema.function.description)
-      .replace('{params}', params);
+    const templateVariables: Record<string, string> = {
+      systemContext: systemContext || 'Project structure not available',
+      userRequest: userRequest,
+      toolName: toolSchema.function.name,
+      toolDescription: toolSchema.function.description,
+      params: params
+    };
+    const argsPrompt = this.replaceTemplateVariables(fullArgsTemplate, templateVariables);
 
     this.logger.debug(`DEBUG: Full model Stage 2 prompt length: ${argsPrompt.length} chars`);
 

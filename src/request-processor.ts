@@ -90,7 +90,6 @@ export interface PlanExecutionState {
 }
 
 export interface ResponseGenerationConfig {
-  toolResultsStreaming?: { template?: string };
   planDecision?: { template?: string }; // renamed from toolResultsNonStreaming
   planIteration?: { template?: string };
   finalIteration?: { template?: string };
@@ -125,6 +124,25 @@ export class RequestProcessor {
     this.responseConfig = responseConfig;
     this.systemConfig = systemConfig;
     this.logger.debug('RequestProcessor configuration updated');
+  }
+
+  /**
+   * Generic method to replace variables in a template string
+   * @param template The template string containing variables like {variableName}
+   * @param variables Object containing variable names and their replacement values
+   * @returns The template with all variables replaced
+   */
+  replaceTemplateVariables(template: string, variables: Record<string, string>): string {
+    let result = template;
+    
+    // Replace each variable in the template
+    for (const [key, value] of Object.entries(variables)) {
+      const placeholder = `{${key}}`;
+      // Use global replace to handle multiple occurrences
+      result = result.split(placeholder).join(value || '');
+    }
+    
+    return result;
   }
 
   convertMessagesToPrompt(messages: any[], systemContext?: string): string {
@@ -294,22 +312,44 @@ export class RequestProcessor {
     tools?: OpenAITool[],
     systemContext?: string
   ): Promise<string> {
-    // Convert all messages to prompt (now includes embedded tool results in assistant messages)
-    let prompt = this.convertMessagesToPrompt(messages, systemContext);
+    // Get the plan decision template
+    const planDecisionTemplate = this.responseConfig.planDecision!.template!;
     
-    // Add the plan decision template
-    let planDecisionTemplate = this.responseConfig.planDecision!.template!;
+    // Extract userPrompt from messages
+    const userMessage = messages.find(msg => msg.role === 'user');
+    const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
     
-    // If tools are provided, replace the toolNamesAndHints placeholder
+    // Create assistantContext from assistant tool usage
+    const assistantMessages = messages.filter(msg => msg.role === 'assistant');
+    const assistantContext = assistantMessages.map(msg => {
+      if (typeof msg.content === 'object' && msg.content.tool) {
+        const assistantResult = msg.content as AssistantToolResult;
+        return `Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${assistantResult.args}. Result: ${assistantResult.results}`;
+      }
+      return msg.content;
+    }).join('\n\n');
+    
+    // Prepare template variables
+    const templateVariables: Record<string, string> = {
+      systemPrompt: this.systemConfig?.customSystemPrompt?.template || '',
+      systemContext: systemContext || '',
+      userPrompt: userPrompt,
+      assistantContext: assistantContext
+    };
+    
+    // Add tools if provided
     if (tools && tools.length > 0) {
-      const toolNamesAndHints = this.toolSelector.formatToolsWithUsageHints(tools);
-      planDecisionTemplate = planDecisionTemplate.replace('{toolNamesAndHints}', toolNamesAndHints);
+      templateVariables.toolNamesAndHints = this.toolSelector.formatToolsWithUsageHints(tools);
     } else {
-      // If no tools provided, remove the placeholder and related text
-      planDecisionTemplate = planDecisionTemplate.replace('\n\nAvailable tools:\n{toolNamesAndHints}', '');
+      // Remove the tools section from template if no tools provided
+      templateVariables.toolNamesAndHints = '';
     }
     
-    prompt += '\n\n' + planDecisionTemplate;
+    // Replace all template variables
+    let prompt = this.replaceTemplateVariables(planDecisionTemplate, templateVariables);
+    
+    // Remove empty sections (like the tools section when no tools are provided)
+    prompt = prompt.replace('\n\nAvailable tools:\n\n', '');
 
     // Debug logging: Final response generation prompt
     this.logger.debug('PLAN DECISION PROMPT (TOOL RESULTS)', {
@@ -325,51 +365,6 @@ export class RequestProcessor {
     return await this.ollamaClient.sendToOllama(prompt, temperature, maxTokens);
   }
 
-  async generateResponseWithToolResultsStreaming(
-    messages: any[],
-    temperature: number,
-    maxTokens: number,
-    res: any
-  ): Promise<void> {
-    // Find the tool results in the messages
-    const toolResults = messages.filter(msg => msg.role === 'tool');
-    const userMessages = messages.filter(msg => msg.role !== 'tool');
-
-    // Create a prompt that includes the tool results
-    let prompt = this.convertMessagesToPrompt(userMessages);
-
-    if (toolResults.length > 0) {
-      prompt += '\n\nTool Execution Results:\n';
-      toolResults.forEach((result, index) => {
-        const toolName = result.name || 'unknown_tool';
-        const resultContent = result.content || '';
-        const isEmpty = !resultContent.trim() || resultContent.length < 5;
-
-        prompt += `Tool ${index + 1}: ${toolName}\n`;
-        if (isEmpty) {
-          prompt += `Status: Executed successfully but returned no results\n`;
-        } else {
-          prompt += `Status: Executed successfully with results\n`;
-          prompt += `Output: ${resultContent}\n`;
-        }
-        prompt += '\n';
-      });
-      prompt += this.responseConfig.toolResultsStreaming!.template!;
-    }
-
-    // Debug logging: Final streaming response generation prompt
-    this.logger.debug('TOOL RESULTS PROMPT (STREAMING)', {
-      originalMessageCount: messages.length,
-      toolResultsCount: toolResults.length,
-      userMessagesCount: userMessages.length,
-      promptLength: prompt.length,
-      fullPrompt: prompt,
-      temperature: temperature,
-      maxTokens: maxTokens
-    });
-
-    await this.ollamaClient.sendToOllamaStreaming(prompt, temperature, maxTokens, res);
-  }
 
   private estimateTokens(text: string): number {
     // Simple token estimation (roughly 4 characters per token)
