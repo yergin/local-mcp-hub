@@ -505,7 +505,7 @@ class LocalMCPHub {
                     role: 'assistant',
                     content: {
                       tool: toolSelection.tool,
-                      prompt: `Use ${toolSelection.tool} to help analyze the request`,
+                      prompt: toolSelection.prompt,
                       args: JSON.stringify(toolSelection.args),
                       results: toolResult
                     }
@@ -546,8 +546,8 @@ class LocalMCPHub {
                       stepsCount: plan.later_steps?.length || 0
                     });
 
-                    // Execute the plan
-                    await this.executePlan(messages, plan, temperature, max_tokens, res);
+                    // Execute the plan with the messages that include the tool result
+                    await this.executePlan(messagesWithTool, plan, temperature, max_tokens, res);
                     logTiming('Plan execution', finalResponseStartTime);
                     logTiming('Total chat completion request', startTime);
                     return;
@@ -1276,7 +1276,9 @@ class LocalMCPHub {
         }).join('\n');
         
         const currentStepTemplate = this.prompts.responseGeneration?.currentStep?.template || '';
+        const currentStepNumber = executionState.completedSteps.length + 1;
         const currentStepVariables: Record<string, string> = {
+          stepNumber: currentStepNumber.toString(),
           objective: currentStepRequest.objective,
           notes: notesLine,
           previousToolList: previousToolList,
@@ -1450,7 +1452,12 @@ class LocalMCPHub {
             executionState.currentStep.tool = stepIterationResponse.current_step.tool;
             executionState.currentStep.prompt = stepIterationResponse.current_step.prompt;
           }
-          executionState.currentStepNotes = stepIterationResponse.current_step.notes_to_future_self;
+          // Accumulate notes instead of replacing them
+          if (executionState.currentStepNotes) {
+            executionState.currentStepNotes += '\n\n' + stepIterationResponse.current_step.notes_to_future_self;
+          } else {
+            executionState.currentStepNotes = stepIterationResponse.current_step.notes_to_future_self;
+          }
           
           // Stream progress update
           this.requestProcessor.streamStepCompletion(

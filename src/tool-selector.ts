@@ -34,6 +34,7 @@ export interface ArgumentGenerationConfig {
 export interface ToolSelectionResult {
   tool: string;
   args: any;
+  prompt: string;
 }
 
 export class ToolSelector {
@@ -253,6 +254,7 @@ export class ToolSelector {
       return {
         tool: selectedTool.function.name,
         args: argsSelection.args || {},
+        prompt: toolSelection.prompt
       };
     } catch (error) {
       this.logger.error('Error in two-stage tool selection:', error);

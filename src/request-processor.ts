@@ -204,6 +204,7 @@ Success: {success}
 
       // Format the step using previousStep template
       const stepVariables: Record<string, string> = {
+        stepNumber: (i + 1).toString(),
         objective: step.objective,
         success: step.success ? 'Yes' : 'No',
         previousToolList: previousToolList,
@@ -539,43 +540,46 @@ Success: {success}
     try {
       const parsed = JSON.parse(response.trim());
       
-      // Check for current step iteration (Option 1)
-      if (parsed.current_step && parsed.current_step.tool && parsed.current_step.prompt) {
+      // Check for Option A: continue_with_current_step
+      if (parsed.continue_with_current_step) {
+        const continueStep = parsed.continue_with_current_step;
         const iterationResponse: CurrentStepIterationResponse = {
           current_step: {
-            notes_to_future_self: parsed.current_step.notes_to_future_self || '',
-            tool: parsed.current_step.tool,
-            prompt: parsed.current_step.prompt
+            notes_to_future_self: continueStep.notes_to_future_self || '',
+            tool: continueStep.tool,
+            prompt: continueStep.prompt
           },
           later_steps: parsed.later_steps
         };
         
-        this.logger.debug('ITERATION RESPONSE: Current step iteration', {
+        this.logger.debug('ITERATION RESPONSE: Continue with current step (Option A)', {
           response: iterationResponse
         });
         
         return iterationResponse;
       }
       
-      // Check for step completion (Option 2)
-      if (parsed.current_step && parsed.current_step.completed === true) {
+      // Check for Option B: wrap_up_current_step + new_step
+      if (parsed.wrap_up_current_step && parsed.new_step) {
+        const wrapUp = parsed.wrap_up_current_step;
+        const newStep = parsed.new_step;
         const completeResponse: CurrentStepCompleteResponse = {
           current_step: {
             completed: true,
-            success: parsed.current_step.success || false,
-            notes_to_future_self: parsed.current_step.notes_to_future_self || ''
+            success: wrapUp.success || false,
+            notes_to_future_self: wrapUp.notes_to_future_self || ''
           },
-          next_step: parsed.next_step ? {
-            objective: parsed.next_step.objective,
-            tool: parsed.next_step.tool,
-            prompt: parsed.next_step.prompt
-          } : undefined,
+          next_step: {
+            objective: newStep.objective,
+            tool: newStep.tool,
+            prompt: newStep.prompt
+          },
           later_steps: parsed.later_steps
         };
         
-        this.logger.debug('ITERATION RESPONSE: Step completion', {
+        this.logger.debug('ITERATION RESPONSE: Wrap up current step and start new (Option B)', {
           response: completeResponse,
-          hasNextStep: !!parsed.next_step
+          hasNextStep: true
         });
         
         return completeResponse;
@@ -603,43 +607,46 @@ Success: {success}
         try {
           const parsed = JSON.parse(jsonMatch[1].trim());
           
-          // Check for current step iteration (Option 1)
-          if (parsed.current_step && parsed.current_step.tool && parsed.current_step.prompt) {
+          // Check for Option A: continue_with_current_step
+          if (parsed.continue_with_current_step) {
+            const continueStep = parsed.continue_with_current_step;
             const iterationResponse: CurrentStepIterationResponse = {
               current_step: {
-                notes_to_future_self: parsed.current_step.notes_to_future_self || '',
-                tool: parsed.current_step.tool,
-                prompt: parsed.current_step.prompt
+                notes_to_future_self: continueStep.notes_to_future_self || '',
+                tool: continueStep.tool,
+                prompt: continueStep.prompt
               },
               later_steps: parsed.later_steps
             };
             
-            this.logger.debug('ITERATION RESPONSE: Current step iteration (from markdown)', {
+            this.logger.debug('ITERATION RESPONSE: Continue with current step (Option A) (from markdown)', {
               response: iterationResponse
             });
             
             return iterationResponse;
           }
           
-          // Check for step completion (Option 2)
-          if (parsed.current_step && parsed.current_step.completed === true) {
+          // Check for Option B: wrap_up_current_step + new_step
+          if (parsed.wrap_up_current_step && parsed.new_step) {
+            const wrapUp = parsed.wrap_up_current_step;
+            const newStep = parsed.new_step;
             const completeResponse: CurrentStepCompleteResponse = {
               current_step: {
                 completed: true,
-                success: parsed.current_step.success || false,
-                notes_to_future_self: parsed.current_step.notes_to_future_self || ''
+                success: wrapUp.success || false,
+                notes_to_future_self: wrapUp.notes_to_future_self || ''
               },
-              next_step: parsed.next_step ? {
-                objective: parsed.next_step.objective,
-                tool: parsed.next_step.tool,
-                prompt: parsed.next_step.prompt
-              } : undefined,
+              next_step: {
+                objective: newStep.objective,
+                tool: newStep.tool,
+                prompt: newStep.prompt
+              },
               later_steps: parsed.later_steps
             };
             
-            this.logger.debug('ITERATION RESPONSE: Step completion (from markdown)', {
+            this.logger.debug('ITERATION RESPONSE: Wrap up current step and start new (Option B) (from markdown)', {
               response: completeResponse,
-              hasNextStep: !!parsed.next_step
+              hasNextStep: true
             });
             
             return completeResponse;
