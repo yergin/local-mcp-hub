@@ -1050,19 +1050,29 @@ class LocalMCPHub {
     // Stream initial plan to user and get stream context
     const streamContext = this.requestProcessor.streamPlanResponse(res, currentPlan, this.config.ollama.model);
 
-    let iterationCount = 0;
-    const maxIterations = 10; // Safety limit
+    let totalIterationCount = 0;
+    let stepIterationCount = 0;
+    const stepLimit = 10; // Maximum number of completed steps
+    const totalIterationLimit = 50; // Maximum number of total iterations across all steps
+    const stepIterationLimit = 10; // Maximum number of iterations per step
 
     logger.debug('PLAN EXECUTION LOOP START', {
-      maxIterations: maxIterations,
+      stepLimit: stepLimit,
+      totalIterationLimit: totalIterationLimit,
+      stepIterationLimit: stepIterationLimit,
       hasNextStep: !!currentPlan.next_step
     });
 
-    while (executionState.currentStep && iterationCount < maxIterations) {
-      iterationCount++;
-      logger.info(`Executing plan step ${iterationCount}: ${executionState.currentStep.objective}`);
+    while (executionState.currentStep && 
+           executionState.completedSteps.length < stepLimit && 
+           totalIterationCount < totalIterationLimit && 
+           stepIterationCount < stepIterationLimit) {
+      totalIterationCount++;
+      stepIterationCount++;
+      logger.info(`Executing plan iteration ${totalIterationCount} (step iteration ${stepIterationCount}): ${executionState.currentStep.objective}`);
       logger.debug('PLAN STEP EXECUTION START', {
-        stepNumber: iterationCount,
+        totalIterationNumber: totalIterationCount,
+        stepIterationNumber: stepIterationCount,
         stepDetails: executionState.currentStep,
         currentExecutionState: executionState
       });
@@ -1282,7 +1292,7 @@ class LocalMCPHub {
         let planIterationPrompt: string;
         const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
         
-        if (iterationCount >= maxIterations) {
+        if (totalIterationCount >= totalIterationLimit || executionState.completedSteps.length >= stepLimit || stepIterationCount >= stepIterationLimit) {
           // Prepare template variables for final iteration
           const templateVariables: Record<string, string> = {
             systemPrompt: systemPrompt,
@@ -1340,10 +1350,11 @@ class LocalMCPHub {
         });
 
         // If this was the final iteration, treat any response as final conclusion
-        if (iterationCount >= maxIterations) {
+        if (totalIterationCount >= totalIterationLimit || executionState.completedSteps.length >= stepLimit || stepIterationCount >= stepIterationLimit) {
           logger.debug('PLAN EXECUTION FINAL ITERATION CONCLUSION', {
             response: response,
-            reason: 'Final iteration reached'
+            reason: totalIterationCount >= totalIterationLimit ? 'Total iteration limit reached' : 
+                    stepIterationCount >= stepIterationLimit ? 'Step iteration limit reached' : 'Step limit reached'
           });
           this.requestProcessor.streamFinalConclusion(res, response, streamContext);
           break;
@@ -1410,6 +1421,7 @@ class LocalMCPHub {
           executionState.currentStepNotes = undefined; // Reset notes for new step
           executionState.currentStepAssistant = undefined; // Reset assistant data for new step
           executionState.currentStepToolCalls = []; // Reset tool calls for new step
+          stepIterationCount = 0; // Reset step iteration counter for new step
           
           // Stream step completion
           this.requestProcessor.streamStepCompletion(
@@ -1458,8 +1470,9 @@ class LocalMCPHub {
         logger.error(`Error executing plan step: ${error}`);
         logger.debug('PLAN STEP ERROR DETAILS', {
           error: error,
-          stepNumber: iterationCount,
-          currentStep: currentPlan.next_step,
+          totalIterationNumber: totalIterationCount,
+          stepIterationNumber: stepIterationCount,
+          currentStep: executionState.currentStep,
           errorMessage: error instanceof Error ? error.message : 'Unknown error',
           errorStack: error instanceof Error ? error.stack : undefined
         });
@@ -1470,8 +1483,12 @@ class LocalMCPHub {
     }
 
     logger.debug('PLAN EXECUTION LOOP END', {
-      iterationCount: iterationCount,
-      maxIterations: maxIterations,
+      totalIterationCount: totalIterationCount,
+      totalIterationLimit: totalIterationLimit,
+      stepIterationCount: stepIterationCount,
+      stepIterationLimit: stepIterationLimit,
+      completedStepsCount: executionState.completedSteps.length,
+      stepLimit: stepLimit,
       hasCurrentStep: !!executionState.currentStep,
       finalExecutionState: executionState
     });
