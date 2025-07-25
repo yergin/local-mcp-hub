@@ -73,8 +73,8 @@ export interface PlanStep {
 
 export interface PlanResponse {
   main_objective: string;
-  conclusion_from_assistant_data?: string;
-  assistant_data_was_helpful?: boolean;
+  conclusion_from_junior_assistant_data?: string;
+  junior_assistant_data_was_helpful?: boolean;
   next_step?: NextStepResponse;
   later_steps: string[];
 }
@@ -93,6 +93,7 @@ export interface ResponseGenerationConfig {
   planDecision?: { template?: string }; // renamed from toolResultsNonStreaming
   planIteration?: { template?: string };
   finalIteration?: { template?: string };
+  planDecisionAssistant?: { template?: string };
 }
 
 export interface SystemMessageConfig {
@@ -145,7 +146,16 @@ export class RequestProcessor {
     return result;
   }
 
-  convertMessagesToPrompt(messages: any[], systemContext?: string): string {
+  /**
+   * Format tool results as block quotes by prepending '>' to each line
+   * @param results The tool results string
+   * @returns The formatted results with block quote formatting
+   */
+  formatToolResultsAsBlockQuote(results: string): string {
+    return results.split('\n').map(line => `> ${line}`).join('\n');
+  }
+
+  convertMessagesToPrompt(messages: any[], projectFileStructure?: string): string {
     // Check if we should override the system prompt
     const customSystem = this.systemConfig.customSystemPrompt;
     let modifiedMessages = messages;
@@ -168,15 +178,16 @@ export class RequestProcessor {
       if (msg.role === 'assistant' && typeof msg.content === 'object' && msg.content.tool) {
         // New Assistant Tool Result Type format
         const assistantResult = msg.content as AssistantToolResult;
-        messageText = `assistant: Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${assistantResult.args}. Result: ${assistantResult.results}`;
+        const formattedResults = this.formatToolResultsAsBlockQuote(assistantResult.results);
+        messageText = `assistant: Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${assistantResult.args}. Result:\n${formattedResults}`;
       } else {
         // Standard message format
         messageText = `${msg.role}: ${msg.content}`;
       }
       
-      // If this is the system message and we have system context, add it after
-      if (msg.role === 'system' && systemContext) {
-        messageText += '\n\n' + systemContext;
+      // If this is the system message and we have project file structure, add it after
+      if (msg.role === 'system' && projectFileStructure) {
+        messageText += '\n\n' + projectFileStructure;
       }
       
       return messageText;
@@ -310,7 +321,7 @@ export class RequestProcessor {
     temperature: number,
     maxTokens: number,
     tools?: OpenAITool[],
-    systemContext?: string
+    projectFileStructure?: string
   ): Promise<string> {
     // Get the plan decision template
     const planDecisionTemplate = this.responseConfig.planDecision!.template!;
@@ -319,12 +330,29 @@ export class RequestProcessor {
     const userMessage = messages.find(msg => msg.role === 'user');
     const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
     
-    // Create assistantContext from assistant tool usage
+    // Create assistantContext from assistant tool usage using template
     const assistantMessages = messages.filter(msg => msg.role === 'assistant');
+    const planDecisionAssistantTemplate = this.responseConfig.planDecisionAssistant?.template || 
+      ` - Tool prompt: "{prompt}"
+ - Tool used: {tool}
+ - Tool args: {args}
+ - Tool Results:
+
+{results}`;
+
     const assistantContext = assistantMessages.map(msg => {
       if (typeof msg.content === 'object' && msg.content.tool) {
         const assistantResult = msg.content as AssistantToolResult;
-        return `Used tool "${assistantResult.tool}" with prompt "${assistantResult.prompt}" and arguments ${assistantResult.args}. Result: ${assistantResult.results}`;
+        const formattedResults = this.formatToolResultsAsBlockQuote(assistantResult.results);
+        
+        const assistantVariables: Record<string, string> = {
+          prompt: assistantResult.prompt,
+          tool: assistantResult.tool,
+          args: assistantResult.args,
+          results: formattedResults
+        };
+        
+        return this.replaceTemplateVariables(planDecisionAssistantTemplate, assistantVariables);
       }
       return msg.content;
     }).join('\n\n');
@@ -332,9 +360,9 @@ export class RequestProcessor {
     // Prepare template variables
     const templateVariables: Record<string, string> = {
       systemPrompt: this.systemConfig?.customSystemPrompt?.template || '',
-      systemContext: systemContext || '',
+      projectFileStructure: projectFileStructure || '',
       userPrompt: userPrompt,
-      assistantContext: assistantContext
+      planDecisionAssistant: assistantContext
     };
     
     // Add tools if provided
@@ -359,7 +387,7 @@ export class RequestProcessor {
       temperature: temperature,
       maxTokens: maxTokens,
       toolsProvided: tools ? tools.length : 0,
-      hasSystemContext: !!systemContext
+      hasProjectFileStructure: !!projectFileStructure
     });
 
     return await this.ollamaClient.sendToOllama(prompt, temperature, maxTokens);

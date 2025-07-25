@@ -48,6 +48,8 @@ interface PromptsConfig {
     planDecision?: { template?: string };
     planIteration?: { template?: string };
     finalIteration?: { template?: string };
+    currentStep?: { template?: string };
+    planDecisionAssistant?: { template?: string };
   };
   systemMessages?: {
     customSystemPrompt?: { template?: string; enabled?: boolean };
@@ -129,8 +131,8 @@ class LocalMCPHub {
   private mcpManager: MCPManager;
   private toolSelector: ToolSelector;
   private requestProcessor: RequestProcessor;
-  private cachedSystemContext: string | null = null;
-  private systemContextTimestamp: number = 0;
+  private cachedProjectFileStructure: string | null = null;
+  private projectFileStructureTimestamp: number = 0;
 
   constructor() {
     this.app = express();
@@ -204,19 +206,19 @@ class LocalMCPHub {
     return path.join(__dirname, '..', '.tmp', ...segments);
   }
 
-  private async getSystemContext(forceRefresh: boolean = false): Promise<string> {
+  private async getProjectFileStructure(forceRefresh: boolean = false): Promise<string> {
     // Use cached version if available and not forcing refresh
-    if (!forceRefresh && this.cachedSystemContext && Date.now() - this.systemContextTimestamp < 30000) {
-      logger.debug('Using cached system context');
-      return this.cachedSystemContext;
+    if (!forceRefresh && this.cachedProjectFileStructure && Date.now() - this.projectFileStructureTimestamp < 30000) {
+      logger.debug('Using cached project file structure');
+      return this.cachedProjectFileStructure;
     }
 
     try {
       if (!this.mcpManager.areAllProcessesReady) {
-        return 'System context unavailable (MCP tools initializing)';
+        return 'Project file structure unavailable (MCP tools initializing)';
       }
 
-      logger.debug(forceRefresh ? 'Refreshing system context' : 'Building initial system context');
+      logger.debug(forceRefresh ? 'Refreshing project file structure' : 'Building initial project file structure');
 
       // Get recursive directory listing and prune to 1 level deep
       const result = await this.mcpManager.callMCPTool('list_dir', { 
@@ -250,16 +252,16 @@ class LocalMCPHub {
       // Sort alphabetically
       allItems.sort();
 
-      const systemContext = `Project structure (1 level deep):\n${allItems.join(', ')}`;
+      const projectFileStructure = allItems.join(', ');
       
       // Cache the result
-      this.cachedSystemContext = systemContext;
-      this.systemContextTimestamp = Date.now();
+      this.cachedProjectFileStructure = projectFileStructure;
+      this.projectFileStructureTimestamp = Date.now();
       
-      return systemContext;
+      return projectFileStructure;
     } catch (error) {
-      logger.warn('Failed to gather system context:', error);
-      return 'System context unavailable';
+      logger.warn('Failed to gather project file structure:', error);
+      return 'Project file structure unavailable';
     }
   }
 
@@ -418,14 +420,14 @@ class LocalMCPHub {
           // Generate final response using tool results
           const mcpTools = this.mcpManager.getOpenAITools();
           
-          const systemContext = await this.getSystemContext();
+          const projectFileStructure = await this.getProjectFileStructure();
           
           const response = await this.requestProcessor.generateResponseWithToolResults(
             messages,
             temperature,
             max_tokens,
             mcpTools,
-            systemContext
+            projectFileStructure
           );
           this.requestProcessor.sendStreamingResponse(res, response, this.config.ollama.model);
           return;
@@ -451,25 +453,25 @@ class LocalMCPHub {
           tools: mcpTools.map((t: OpenAITool) => t.function.name),
         });
 
-        // Get system context for better tool selection and planning (cached)
-        let systemContext = '';
+        // Get project file structure for better tool selection and planning (cached)
+        let projectFileStructure = '';
         try {
-          const systemContextStartTime = Date.now();
-          systemContext = await this.getSystemContext(); // Uses cache by default
-          logTiming('System context gathering (cached)', systemContextStartTime);
-          logger.debug('System context gathered for tool selection', {
-            contextLength: systemContext.length,
-            contextPreview: systemContext.substring(0, 200) + '...'
+          const projectFileStructureStartTime = Date.now();
+          projectFileStructure = await this.getProjectFileStructure(); // Uses cache by default
+          logTiming('Project file structure gathering (cached)', projectFileStructureStartTime);
+          logger.debug('Project file structure gathered for tool selection', {
+            contextLength: projectFileStructure.length,
+            contextPreview: projectFileStructure.substring(0, 200) + '...'
           });
         } catch (contextError) {
-          logger.warn('Failed to gather system context for tool selection', {
+          logger.warn('Failed to gather project file structure for tool selection', {
             error: contextError instanceof Error ? contextError.message : 'Unknown error'
           });
-          systemContext = 'System context unavailable';
+          projectFileStructure = 'Project file structure unavailable';
         }
 
         const selectionStartTime = Date.now();
-        const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools, undefined, systemContext);
+        const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools, undefined, projectFileStructure);
         logTiming('Tool selection', selectionStartTime);
         logger.info('Tool selected', {
           tool: toolSelection?.tool,
@@ -523,7 +525,7 @@ class LocalMCPHub {
                   temperature,
                   max_tokens,
                   mcpTools,
-                  systemContext
+                  projectFileStructure
                 );
 
                 logger.debug('PLAN DECISION RESPONSE', {
@@ -1006,11 +1008,11 @@ class LocalMCPHub {
     
     // Create initial completed step from assistant data evaluation
     const initialCompletedSteps: CompletedStepRequest[] = [];
-    if (currentPlan.conclusion_from_assistant_data || currentPlan.assistant_data_was_helpful !== undefined) {
+    if (currentPlan.conclusion_from_junior_assistant_data || currentPlan.junior_assistant_data_was_helpful !== undefined) {
       initialCompletedSteps.push({
-        objective: "assistant to help gather initial information",
-        success: currentPlan.assistant_data_was_helpful || false,
-        conclusion: currentPlan.conclusion_from_assistant_data || "No conclusion provided from assistant data"
+        objective: "Assistant gathers initial information",
+        success: currentPlan.junior_assistant_data_was_helpful || false,
+        conclusion: currentPlan.conclusion_from_junior_assistant_data || "No conclusion provided from assistant data"
       });
     }
     
@@ -1101,21 +1103,21 @@ class LocalMCPHub {
             const userRequest = executionState.currentStep!.prompt;
             const isSimpleArg = this.toolSelector.isSimpleArgumentGeneration(executionState.currentStep!.tool);
             
-            // Get system context for argument generation (same as used for initial tool selection)
-            const systemContext = await this.getSystemContext();
+            // Get project file structure for argument generation (same as used for initial tool selection)
+            const projectFileStructure = await this.getProjectFileStructure();
             
             logger.debug('PLAN STEP ARG STRATEGY', {
               tool: executionState.currentStep!.tool,
               isSimpleArg: isSimpleArg,
               userRequest: userRequest,
-              hasSystemContext: !!systemContext
+              hasProjectFileStructure: !!projectFileStructure
             });
 
             let toolArgs;
             if (isSimpleArg) {
-              toolArgs = await this.toolSelector.generateArgsWithFastModel(userRequest, currentTool, systemContext);
+              toolArgs = await this.toolSelector.generateArgsWithFastModel(userRequest, currentTool, projectFileStructure);
             } else {
-              toolArgs = await this.toolSelector.generateArgsWithFullModel(userRequest, currentTool, systemContext);
+              toolArgs = await this.toolSelector.generateArgsWithFullModel(userRequest, currentTool, projectFileStructure);
             }
 
             logger.debug('PLAN STEP GENERATED ARGS', {
@@ -1187,8 +1189,8 @@ class LocalMCPHub {
         const iterationMcpTools = this.mcpManager.getOpenAITools();
         const toolNamesAndHints = this.toolSelector.formatToolsWithUsageHints(iterationMcpTools);
 
-        // Get refreshed system context for plan iteration (files may have changed)
-        const systemContext = await this.getSystemContext(true); // Force refresh
+        // Get refreshed project file structure for plan iteration (files may have changed)
+        const projectFileStructure = await this.getProjectFileStructure(true); // Force refresh
 
         // Create prompt for plan iteration using the new template format
         const completedStepsText = executionState.completedSteps.length > 0 
@@ -1215,17 +1217,19 @@ class LocalMCPHub {
           }
         };
         
-        // Format current step as readable text instead of JSON
-        const notesLine = currentStepRequest.notes && currentStepRequest.notes.trim() 
-          ? `   Notes: "${currentStepRequest.notes}"\n` 
-          : '';
-        const currentStepText = `   Objective: "${currentStepRequest.objective}"
-   Completed: ${currentStepRequest.completed}
-${notesLine}   Completed Assistant Task:
-      Tool Used: ${currentStepRequest.assistant.tool}
-      Tool Prompt: "${currentStepRequest.assistant.prompt}"
-      Tool Args: ${currentStepRequest.assistant.args}
-      Tool Results: "${currentStepRequest.assistant.results}"`;
+        // Format current step using template
+        const notesLine = currentStepRequest.notes && currentStepRequest.notes.trim() || "*No notes yet*";
+        const currentStepTemplate = this.prompts.responseGeneration?.currentStep?.template || '';
+        const currentStepVariables: Record<string, string> = {
+          objective: currentStepRequest.objective,
+          notes: notesLine,
+          tool: currentStepRequest.assistant.tool,
+          prompt: currentStepRequest.assistant.prompt,
+          args: currentStepRequest.assistant.args,
+          results: this.requestProcessor.formatToolResultsAsBlockQuote(currentStepRequest.assistant.results)
+        };
+        
+        const currentStepText = this.requestProcessor.replaceTemplateVariables(currentStepTemplate, currentStepVariables);
         
         // Use finalIteration template if this is the last iteration
         let planIterationPrompt: string;
@@ -1235,11 +1239,10 @@ ${notesLine}   Completed Assistant Task:
           // Prepare template variables for final iteration
           const templateVariables: Record<string, string> = {
             systemPrompt: systemPrompt,
-            systemContext: systemContext,
+            projectFileStructure: projectFileStructure,
             userPrompt: userPrompt,
             objective: executionState.objective,
-            completedSteps: completedStepsText,
-            currentStepStatus: currentStepText
+            completedSteps: completedStepsText
           };
           
           planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
@@ -1250,7 +1253,7 @@ ${notesLine}   Completed Assistant Task:
           // Prepare template variables for regular iteration
           const templateVariables: Record<string, string> = {
             systemPrompt: systemPrompt,
-            systemContext: systemContext,
+            projectFileStructure: projectFileStructure,
             userPrompt: userPrompt,
             objective: executionState.objective,
             completedSteps: completedStepsText,

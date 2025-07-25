@@ -37,6 +37,13 @@ class ApiCallExtractor {
   private allCalls: ApiCall[] = [];
   public userRequests: UserRequest[] = [];
   
+  /**
+   * Convert text to block quote format by prepending '>' to each line
+   */
+  private toBlockQuote(text: string): string {
+    return text.split('\n').map(line => `> ${line}`).join('\n');
+  }
+  
   async findUserRequests(logPath: string): Promise<void> {
     const content = await readFile(logPath, 'utf-8');
     const lines = content.split('\n');
@@ -261,7 +268,7 @@ class ApiCallExtractor {
 *Generated: ${new Date().toISOString().split('T')[0]}*
 
 ## User Request
-"${userRequest}"
+${this.toBlockQuote(userRequest)}
 
 `;
 
@@ -299,26 +306,30 @@ class ApiCallExtractor {
       md += `**Timestamp**: ${call.timestamp}\n\n`;
 
       if (call.type === 'http') {
-        md += `**Request**:\n\`\`\`http\n${call.method} ${call.url} HTTP/1.1\n`;
+        md += `**Request**:\n`;
+        md += this.toBlockQuote(`${call.method} ${call.url} HTTP/1.1`);
+        md += '\n';
         if (call.headers) {
           const importantHeaders = ['host', 'content-type', 'authorization', 'user-agent'];
           for (const [key, value] of Object.entries(call.headers)) {
             if (importantHeaders.includes(key.toLowerCase())) {
-              md += `${key}: ${value}\n`;
+              md += this.toBlockQuote(`${key}: ${value}`) + '\n';
             }
           }
         }
-        md += `\n${JSON.stringify(call.body, null, 2)}\n\`\`\`\n\n`;
+        md += this.toBlockQuote('') + '\n';
+        md += this.toBlockQuote(JSON.stringify(call.body, null, 2)) + '\n\n';
       } else if (call.type === 'mcp') {
         md += `**Tool**: ${call.url}\n\n`;
-        md += `**Request**:\n\`\`\`json\n${JSON.stringify(call.body, null, 2)}\n\`\`\`\n\n`;
+        md += `**Request**:\n`;
+        md += this.toBlockQuote(JSON.stringify(call.body, null, 2)) + '\n\n';
         if (call.response?.result) {
           md += `**Response**:\n`;
           try {
             const parsed = JSON.parse(call.response.result);
-            md += `\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\`\n`;
+            md += this.toBlockQuote(JSON.stringify(parsed, null, 2)) + '\n';
           } catch {
-            md += `\`\`\`\n${call.response.result}\n\`\`\`\n`;
+            md += this.toBlockQuote(call.response.result) + '\n';
           }
         }
         if (call.duration) {
@@ -339,18 +350,17 @@ class ApiCallExtractor {
         if (call.body?.prompt) {
           const prompt = call.body.prompt;
           const isTruncated = call.body._promptTruncated;
-          md += `**Prompt**${isTruncated ? ' (truncated in logs)' : ''}:\n\`\`\`\n`;
-          md += prompt + '\n';
-          md += `\`\`\`\n\n`;
+          md += `**Prompt**${isTruncated ? ' (truncated in logs)' : ''}:\n`;
+          md += this.toBlockQuote(prompt) + '\n\n';
         }
         
         if (call.response?.content) {
           md += `**Response**:\n`;
           try {
             const parsed = JSON.parse(call.response.content);
-            md += `\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\`\n`;
+            md += this.toBlockQuote(JSON.stringify(parsed, null, 2)) + '\n';
           } catch {
-            md += `\`\`\`\n${call.response.content}\n\`\`\`\n`;
+            md += this.toBlockQuote(call.response.content) + '\n';
           }
         }
         if (call.duration) {

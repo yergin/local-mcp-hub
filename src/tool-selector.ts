@@ -135,7 +135,7 @@ export class ToolSelector {
     messages: any[],
     tools: OpenAITool[],
     directoryContext?: string,
-    systemContext?: string
+    projectFileStructure?: string
   ): Promise<ToolSelectionResult | null> {
     const startTime = Date.now();
     const lastMessage = messages[messages.length - 1];
@@ -162,7 +162,7 @@ export class ToolSelector {
     const toolSelectionTemplate = this.toolSelectionConfig.stage1.template;
     const templateVariables: Record<string, string> = {
       userRequest: userRequest,
-      systemContext: systemContext || 'System context not available',
+      projectFileStructure: projectFileStructure || 'Project file structure not available',
       toolNames: toolNames
     };
     const toolSelectionPrompt = this.replaceTemplateVariables(toolSelectionTemplate, templateVariables);
@@ -218,16 +218,20 @@ export class ToolSelector {
       const stage2StartTime = Date.now();
       let argsSelection;
 
+      // Use the prompt from toolSelection for argument generation
+      const toolPrompt = toolSelection.prompt || userRequest;
+
       if (this.isSimpleArgumentGeneration(toolSelection.tool)) {
         this.logger.info('Using fast model for simple argument generation', {
           tool: toolSelection.tool,
+          prompt: toolPrompt
         });
-        argsSelection = await this.generateArgsWithFastModel(userRequest, selectedTool, systemContext);
+        argsSelection = await this.generateArgsWithFastModel(toolPrompt, selectedTool, projectFileStructure);
       } else {
         this.logger.info(
           `🧠 Using full model for complex argument generation: ${toolSelection.tool}`
         );
-        argsSelection = await this.generateArgsWithFullModel(userRequest, selectedTool, systemContext);
+        argsSelection = await this.generateArgsWithFullModel(toolPrompt, selectedTool, projectFileStructure);
       }
 
       const modelType = this.isSimpleArgumentGeneration(toolSelection.tool)
@@ -251,7 +255,7 @@ export class ToolSelector {
   async generateArgsWithFastModel(
     userRequest: string,
     toolSchema: OpenAITool,
-    systemContext?: string
+    projectFileStructure?: string
   ): Promise<any> {
     const requiredParams = toolSchema.function.parameters.required || [];
     const params = Object.entries(toolSchema.function.parameters.properties || {})
@@ -267,8 +271,9 @@ export class ToolSelector {
     // Use configured prompt template for fast model
     const fastArgsTemplate = this.argumentGenerationConfig.fastModel.template;
     const templateVariables: Record<string, string> = {
-      systemContext: systemContext || 'Project structure not available',
+      projectFileStructure: projectFileStructure || 'Project structure not available',
       toolName: toolSchema.function.name,
+      toolDescription: toolSchema.function.description,
       userRequest: userRequest,
       params: params
     };
@@ -304,7 +309,7 @@ export class ToolSelector {
   async generateArgsWithFullModel(
     userRequest: string,
     toolSchema: OpenAITool,
-    systemContext?: string
+    projectFileStructure?: string
   ): Promise<any> {
     const requiredParams = toolSchema.function.parameters.required || [];
     const params = Object.entries(toolSchema.function.parameters.properties || {})
@@ -320,7 +325,7 @@ export class ToolSelector {
     // Use configured prompt template for full model
     const fullArgsTemplate = this.argumentGenerationConfig.fullModel.template;
     const templateVariables: Record<string, string> = {
-      systemContext: systemContext || 'Project structure not available',
+      projectFileStructure: projectFileStructure || 'Project structure not available',
       userRequest: userRequest,
       toolName: toolSchema.function.name,
       toolDescription: toolSchema.function.description,
