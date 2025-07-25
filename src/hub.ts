@@ -1253,10 +1253,23 @@ class LocalMCPHub {
         
         // Format current step using template
         const notesLine = currentStepRequest.notes && currentStepRequest.notes.trim() || "*No notes yet*";
+        
+        // Format previous tool list for current step using previousTool template
+        const previousToolTemplate = this.prompts.responseGeneration?.previousTool?.template || '';
+        const previousToolList = executionState.currentStepToolCalls.map(toolCall => {
+          const toolVariables: Record<string, string> = {
+            prompt: toolCall.prompt,
+            tool: toolCall.tool,
+            args: toolCall.args
+          };
+          return this.requestProcessor.replaceTemplateVariables(previousToolTemplate, toolVariables);
+        }).join('\n');
+        
         const currentStepTemplate = this.prompts.responseGeneration?.currentStep?.template || '';
         const currentStepVariables: Record<string, string> = {
           objective: currentStepRequest.objective,
           notes: notesLine,
+          previousToolList: previousToolList,
           tool: currentStepRequest.assistant.tool,
           prompt: currentStepRequest.assistant.prompt,
           args: currentStepRequest.assistant.args,
