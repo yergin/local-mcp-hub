@@ -98,6 +98,17 @@ export class PromptManager {
   }
 
   /**
+   * Get any template by dot-notation path (generic access)
+   */
+  getTemplateByPath(path: string): PromptTemplate & { useFastModel?: boolean } | undefined {
+    const value = this.templates[path as keyof PromptTemplates];
+    if (typeof value === 'object' && !Array.isArray(value) && ('template' in value || 'message' in value)) {
+      return value as PromptTemplate & { useFastModel?: boolean };
+    }
+    return undefined;
+  }
+
+  /**
    * Get tool guidance configuration
    */
   getToolGuidance(): {

@@ -16,6 +16,7 @@ import { RequestProcessor } from './request-processor';
 import { PlanExecutor } from './plan-executor';
 import { PlanExecutorV1 } from './plan-executor-v1';
 import { PlanExecutorV2 } from './plan-executor-v2';
+import { PlanExecutorV3 } from './plan-executor-v3';
 import { PromptManager } from './prompt-manager';
 
 // Prompts configuration interfaces
@@ -32,12 +33,18 @@ interface PromptsConfig {
     main: PromptConfig;
     fast: PromptConfig;
   };
-  toolSelection: {
-    stage1: PromptConfig;
+  v1?: {
+    toolSelection: {
+      stage1: PromptConfig;
+    };
+    argumentGeneration: {
+      fastModel: PromptConfig;
+      fullModel: PromptConfig;
+    };
   };
-  argumentGeneration: {
-    fastModel: PromptConfig;
-    fullModel: PromptConfig;
+  v3?: {
+    intentClassification: PromptConfig;
+    informationTypeClassification: PromptConfig;
   };
   codeCompletion: {
     completion: PromptConfig;
@@ -69,7 +76,7 @@ interface Config {
     cors_origins: string[];
     default_temperature?: number;
     default_max_tokens?: number;
-    executor?: 'v1' | 'v2'; // Which plan executor to use (defaults to 'v1' if not specified)
+    executor?: 'v1' | 'v2' | 'v3'; // Which plan executor to use (defaults to 'v1' if not specified)
   };
   mcps: MCPConfig;
 }
@@ -138,6 +145,7 @@ class LocalMCPHub {
   private requestProcessor: RequestProcessor;
   private planExecutor: PlanExecutorV1;
   private planExecutorV2: PlanExecutorV2;
+  private planExecutorV3: PlanExecutorV3;
   private selectedExecutor: PlanExecutor;
   private cachedProjectFileStructure: string | null = null;
   private projectFileStructureTimestamp: number = 0;
@@ -163,8 +171,8 @@ class LocalMCPHub {
     this.toolSelector = new ToolSelector(
       this.ollamaClient,
       this.prompts.toolGuidance || {},
-      this.prompts.toolSelection as any,
-      this.prompts.argumentGeneration as any,
+      this.prompts.v1?.toolSelection as any,
+      this.prompts.v1?.argumentGeneration as any,
       logger
     );
     this.requestProcessor = new RequestProcessor(
@@ -193,6 +201,16 @@ class LocalMCPHub {
       logger
     );
 
+    this.planExecutorV3 = new PlanExecutorV3(
+      this.config,
+      this.ollamaClient,
+      this.toolSelector,
+      this.requestProcessor,
+      this.mcpManager,
+      this.promptManager,
+      logger
+    );
+
     // Select which executor to use based on configuration
     this.selectedExecutor = this.selectExecutor();
 
@@ -209,6 +227,9 @@ class LocalMCPHub {
       case 'v2':
         logger.info('Using Plan Executor V2');
         return this.planExecutorV2;
+      case 'v3':
+        logger.info('Using Plan Executor V3');
+        return this.planExecutorV3;
       default:
         // This should never happen due to validation in loadConfig()
         throw new Error(`Unexpected executor type: ${this.config.hub.executor}`);
@@ -228,8 +249,8 @@ class LocalMCPHub {
       }
 
       // Validate executor value
-      if (config.hub.executor !== 'v1' && config.hub.executor !== 'v2') {
-        logger.error(`Invalid executor "${config.hub.executor}" in config. Must be 'v1' or 'v2'. Defaulting to 'v1'.`);
+      if (config.hub.executor !== 'v1' && config.hub.executor !== 'v2' && config.hub.executor !== 'v3') {
+        logger.error(`Invalid executor "${config.hub.executor}" in config. Must be 'v1', 'v2', or 'v3'. Defaulting to 'v1'.`);
         config.hub.executor = 'v1';
       }
 
@@ -336,7 +357,7 @@ class LocalMCPHub {
       // Sort alphabetically
       allItems.sort();
 
-      const projectFileStructure = allItems.join(', ');
+      const projectFileStructure = allItems.join('\n');
       
       // Cache the result
       this.cachedProjectFileStructure = projectFileStructure;
@@ -537,129 +558,20 @@ class LocalMCPHub {
           tools: mcpTools.map((t: OpenAITool) => t.function.name),
         });
 
-        // Get project file structure for better tool selection and planning (cached)
-        let projectFileStructure = '';
-        try {
-          const projectFileStructureStartTime = Date.now();
-          projectFileStructure = await this.getProjectFileStructure(); // Uses cache by default
-          logTiming('Project file structure gathering (cached)', projectFileStructureStartTime);
-          logger.debug('Project file structure gathered for tool selection', {
-            contextLength: projectFileStructure.length,
-            contextPreview: projectFileStructure.substring(0, 200) + '...'
-          });
-        } catch (contextError) {
-          logger.warn('Failed to gather project file structure for tool selection', {
-            error: contextError instanceof Error ? contextError.message : 'Unknown error'
-          });
-          projectFileStructure = 'Project file structure unavailable';
-        }
+        // Delegate to selected executor for tool selection and execution
+        await this.selectedExecutor.handleRequest(
+          messages,
+          res,
+          temperature,
+          max_tokens,
+          mcpTools,
+          (forceRefresh?: boolean) => this.getProjectFileStructure(forceRefresh),
+          this.config.hub.default_temperature,
+          this.config.hub.default_max_tokens
+        );
 
-        const selectionStartTime = Date.now();
-        const toolSelection = await this.toolSelector.selectToolWithLLM(messages, mcpTools, undefined, projectFileStructure);
-        logTiming('Tool selection', selectionStartTime);
-        logger.info('Tool selected', {
-          tool: toolSelection?.tool,
-          hasArgs: !!toolSelection?.args,
-        });
-
-        if (toolSelection) {
-            logger.info(`Processing tool selection: ${toolSelection.tool}`);
-
-            // Check if this is a safe tool that can be auto-executed
-            if (this.toolSelector.isSafeTool(toolSelection.tool)) {
-              logger.info(`Auto-executing safe tool: ${toolSelection.tool}`);
-
-              try {
-                // Execute the tool automatically
-                const toolExecStartTime = Date.now();
-                const toolResult = await this.mcpManager.callMCPTool(
-                  toolSelection.tool,
-                  toolSelection.args
-                );
-                logTiming(`Tool execution: ${toolSelection.tool}`, toolExecStartTime);
-                logger.info('Tool executed successfully', { resultLength: toolResult.length });
-
-                // Create messages with tool result for decision making using new Assistant Tool Result Type
-                const messagesWithTool = [
-                  ...messages,
-                  {
-                    role: 'assistant',
-                    content: {
-                      tool: toolSelection.tool,
-                      prompt: toolSelection.prompt,
-                      args: JSON.stringify(toolSelection.args),
-                      results: toolResult
-                    }
-                  }
-                ];
-
-                const finalResponseStartTime = Date.now();
-                logger.info('Starting response generation - delegating to selected executor');
-
-                // Delegate to selected executor
-                logger.debug('DELEGATING TO EXECUTOR', {
-                  messagesWithToolCount: messagesWithTool.length,
-                  fullMessages: messagesWithTool,
-                  temperature: temperature,
-                  maxTokens: max_tokens
-                });
-
-                await this.selectedExecutor.handleRequest(
-                  messagesWithTool,
-                  res,
-                  temperature,
-                  max_tokens,
-                  mcpTools,
-                  (forceRefresh?: boolean) => this.getProjectFileStructure(forceRefresh),
-                  this.config.hub.default_temperature,
-                  this.config.hub.default_max_tokens
-                );
-
-                logTiming('Executor execution', finalResponseStartTime);
-                logTiming('Total chat completion request', startTime);
-                return;
-              } catch (toolError) {
-                logger.error('Tool execution failed:', toolError);
-
-                // Fall back to asking for permission
-                const permissionResponse = this.prompts
-                  .systemMessages!.toolPermissionError!.template!.replace(
-                    '{toolName}',
-                    toolSelection.tool
-                  )
-                  .replace(
-                    '{error}',
-                    toolError instanceof Error ? toolError.message : 'Unknown error'
-                  );
-
-                this.requestProcessor.sendStreamingResponse(
-                  res,
-                  permissionResponse,
-                  this.config.ollama.model
-                );
-                return;
-              }
-            } else {
-              // Ask for permission for potentially unsafe tools
-              logger.info(`Asking permission for potentially unsafe tool: ${toolSelection.tool}`);
-
-              const permissionTemplateVariables: Record<string, string> = {
-                toolName: toolSelection.tool,
-                args: JSON.stringify(toolSelection.args)
-              };
-              const permissionMessage = this.requestProcessor.replaceTemplateVariables(
-                this.prompts.systemMessages!.toolPermissionRequest!.template!,
-                permissionTemplateVariables
-              );
-
-              this.requestProcessor.sendStreamingResponse(
-                res,
-                permissionMessage,
-                this.config.ollama.model
-              );
-              return;
-            }
-          }
+        logTiming('Total chat completion request', startTime);
+        return;
 
         // No tools needed, generate normal response
         const promptStartTime = Date.now();
@@ -985,8 +897,8 @@ class LocalMCPHub {
         // Update all components with new prompts configuration
         this.toolSelector.updateConfig(
           this.prompts.toolGuidance || {},
-          this.prompts.toolSelection as any,
-          this.prompts.argumentGeneration as any
+          this.prompts.v1?.toolSelection as any,
+          this.prompts.v1?.argumentGeneration as any
         );
         
         this.requestProcessor.updateConfig(

@@ -9,6 +9,20 @@ import {
   AssistantToolResult
 } from './request-processor';
 
+// Stage1 tool selection interfaces
+export interface Stage1ToolSelection {
+  tool: string;
+  prompt: string;
+  args?: any;
+}
+
+export interface Stage1Config {
+  template: string;
+  temperature: number;
+  maxTokens: number;
+  useFastModel: boolean;
+}
+
 // Step-related interfaces (moved from RequestProcessor)
 export interface CurrentStepIterationResponse {
   current_step: {
@@ -109,6 +123,7 @@ export class PlanExecutorV1 implements PlanExecutor {
   private mcpManager: MCPManager;
   private promptManager: PromptManager;
   private config: PlanExecutorConfig;
+  private fullHubConfig: any; // Store full hub config for access to prompts
 
   constructor(
     fullConfig: any, // Full hub configuration
@@ -125,6 +140,7 @@ export class PlanExecutorV1 implements PlanExecutor {
     this.mcpManager = mcpManager;
     this.promptManager = promptManager;
     this.logger = logger;
+    this.fullHubConfig = fullConfig;
     
     // Extract executor-specific configuration with defaults
     this.config = this.extractConfig(fullConfig);
@@ -142,6 +158,121 @@ export class PlanExecutorV1 implements PlanExecutor {
   }
 
   /**
+   * Stage 1 tool selection - moved from ToolSelector to V1 specific logic
+   */
+  async selectToolWithStage1(
+    messages: any[], 
+    tools: OpenAITool[], 
+    config?: any, 
+    projectFileStructure?: string
+  ): Promise<Stage1ToolSelection | null> {
+    const userMessage = messages.find(msg => msg.role === 'user');
+    const userRequest = userMessage?.content || 'No user request found';
+    
+    this.logger.debug(`V1 Stage1: User request: "${userRequest}"`);
+    this.logger.debug(`V1 Stage1: Number of tools: ${tools.length}`);
+
+    // Get stage1 config from prompts
+    const stage1Config = this.promptManager.getTemplateByPath('v1.toolSelection.stage1') as Stage1Config;
+    if (!stage1Config) {
+      this.logger.error('V1 Stage1: No stage1 configuration found');
+      return null;
+    }
+
+    // Stage 1: Select only from read-only tools for information gathering, excluding blacklisted tools
+    const readOnlyToolNames = this.toolSelector.getToolGuidanceConfig().readOnlyTools || [];
+    const blacklist = this.toolSelector.getToolGuidanceConfig().toolsBlackList || [];
+    const readOnlyTools = tools.filter(tool => 
+      readOnlyToolNames.includes(tool.function.name) && !blacklist.includes(tool.function.name)
+    );
+    
+    this.logger.debug(`V1 Stage1: Filtered to ${readOnlyTools.length} read-only tools from ${tools.length} total tools`);
+    
+    // Create mapping from normalized names (underscores) to actual tool objects
+    const normalizedToolMap = new Map<string, OpenAITool>();
+    readOnlyTools.forEach(tool => {
+      const normalizedName = tool.function.name.replace(/-/g, '_');
+      normalizedToolMap.set(normalizedName, tool);
+    });
+    
+    const toolNames = this.toolSelector.formatToolsWithUsageHints(readOnlyTools);
+
+    const templateVariables: Record<string, string> = {
+      userRequest: userRequest,
+      projectFileStructure: projectFileStructure || 'Project file structure not available',
+      toolNames: toolNames
+    };
+    const toolSelectionPrompt = this.requestProcessor.replaceTemplateVariables(stage1Config.template, templateVariables);
+
+    this.logger.debug(`V1 Stage1: prompt length: ${toolSelectionPrompt.length} chars`);
+
+    try {
+      // Stage 1: Select the tool using fast model
+      const stage1StartTime = Date.now();
+      const toolResponse = await this.ollamaClient.sendToOllama(
+        toolSelectionPrompt,
+        stage1Config.temperature,
+        stage1Config.maxTokens,
+        stage1Config.useFastModel
+      );
+      const cleanToolResponse = toolResponse
+        .trim()
+        .replace(/```json|```/g, '')
+        .trim();
+
+      this.logger.debug(`V1 Stage1: response: "${cleanToolResponse}"`);
+
+      let toolSelection;
+      try {
+        toolSelection = JSON.parse(cleanToolResponse);
+      } catch (parseError) {
+        this.logger.error(`V1 Stage1: Failed to parse tool selection JSON: ${parseError}`, {
+          response: cleanToolResponse,
+        });
+        return null;
+      }
+
+      if (!toolSelection.tool || toolSelection.tool === null) {
+        this.logger.info('V1 Stage1: No tool selected by LLM');
+        return null;
+      }
+
+      // Find the selected tool using normalized name mapping
+      const selectedTool = normalizedToolMap.get(toolSelection.tool);
+      if (!selectedTool) {
+        this.logger.warn(`V1 Stage1: LLM selected tool not in read-only list: ${toolSelection.tool}`);
+        return null;
+      }
+
+      this.logger.info(`V1 Stage1: LLM selected tool: ${toolSelection.tool} -> ${selectedTool.function.name}`);
+
+      // Stage 2: Generate arguments using existing ToolSelector
+      let argsSelection;
+      const toolPrompt = toolSelection.prompt || userRequest;
+
+      if (this.toolSelector.isSimpleArgumentGeneration(toolSelection.tool)) {
+        this.logger.info('V1 Stage1: Using fast model for simple argument generation');
+        argsSelection = await this.toolSelector.generateArgsWithFastModel(toolPrompt, selectedTool, projectFileStructure);
+      } else {
+        this.logger.info('V1 Stage1: Using full model for complex argument generation');
+        argsSelection = await this.toolSelector.generateArgsWithFullModel(toolPrompt, selectedTool, projectFileStructure);
+      }
+
+      const args = argsSelection && typeof argsSelection === 'object' && 'args' in argsSelection ? argsSelection.args : argsSelection;
+
+      return {
+        tool: selectedTool.function.name,
+        prompt: toolPrompt,
+        args: args
+      };
+
+    } catch (error) {
+      this.logger.error('V1 Stage1: Tool selection failed', { error: error instanceof Error ? error.message : 'Unknown error' });
+      return null;
+    }
+  }
+
+  /**
    * Determines if the response contains a plan
    */
   isPlanResponse(response: string): boolean {
@@ -156,7 +287,7 @@ export class PlanExecutorV1 implements PlanExecutor {
       const parsed = JSON.parse(response.trim());
       const isPlan = parsed && 
              typeof parsed.main_objective === 'string' && 
-             Array.isArray(parsed.later_steps) &&
+             (parsed.later_steps === undefined || Array.isArray(parsed.later_steps)) &&
              (parsed.next_step === undefined || 
               (typeof parsed.next_step === 'object' && 
                parsed.next_step.tool && 
@@ -189,7 +320,7 @@ export class PlanExecutorV1 implements PlanExecutor {
           const parsed = JSON.parse(jsonMatch[0]);
           const isPlan = parsed && 
                  typeof parsed.main_objective === 'string' && 
-                 Array.isArray(parsed.later_steps);
+                 (parsed.later_steps === undefined || Array.isArray(parsed.later_steps));
 
           this.logger.debug('PLAN DETECTION (EXTRACTED JSON RESULT)', {
             isPlan: isPlan,
@@ -252,7 +383,7 @@ export class PlanExecutorV1 implements PlanExecutor {
           const parsed = JSON.parse(jsonMatch[0]);
           if (parsed && 
               typeof parsed.main_objective === 'string' && 
-              Array.isArray(parsed.later_steps)) {
+              (parsed.later_steps === undefined || Array.isArray(parsed.later_steps))) {
             this.logger.debug('PLAN EXTRACTION SUCCESS (EXTRACTED JSON)', {
               extractedPlan: parsed,
               objective: parsed.main_objective,
@@ -289,7 +420,105 @@ export class PlanExecutorV1 implements PlanExecutor {
     defaultTemperature?: number,
     defaultMaxTokens?: number
   ): Promise<void> {
-    // Generate response first
+    // First, check if this is a request that already has tool results (from a previous execution)
+    const lastMessage = messages[messages.length - 1];
+    const hasToolResults = lastMessage?.role === 'assistant' && 
+                          lastMessage?.content && 
+                          typeof lastMessage.content === 'object' && 
+                          'tool' in lastMessage.content;
+
+    if (!hasToolResults) {
+      // No tool results yet, need to do tool selection and execution first
+      const projectFileStructure = await projectFileStructureGetter();
+      const toolSelection = await this.selectToolWithStage1(messages, tools, undefined, projectFileStructure);
+      
+      if (toolSelection) {
+        this.logger.info(`Processing tool selection: ${toolSelection.tool}`);
+
+        // Check if this is a safe tool that can be auto-executed
+        if (this.toolSelector.isSafeTool(toolSelection.tool)) {
+          this.logger.info(`Auto-executing safe tool: ${toolSelection.tool}`);
+
+          try {
+            // Execute the tool automatically
+            const toolResult = await this.mcpManager.callMCPTool(
+              toolSelection.tool,
+              toolSelection.args
+            );
+            this.logger.info('Tool executed successfully', { resultLength: toolResult.length });
+
+            // Create messages with tool result for decision making
+            const messagesWithTool = [
+              ...messages,
+              {
+                role: 'assistant',
+                content: {
+                  tool: toolSelection.tool,
+                  prompt: toolSelection.prompt,
+                  args: JSON.stringify(toolSelection.args),
+                  results: toolResult
+                }
+              }
+            ];
+
+            // Recursively call handleRequest with tool results
+            return this.handleRequest(
+              messagesWithTool,
+              res,
+              temperature,
+              maxTokens,
+              tools,
+              projectFileStructureGetter,
+              defaultTemperature,
+              defaultMaxTokens
+            );
+
+          } catch (toolError) {
+            this.logger.error('Tool execution failed:', toolError);
+
+            // Treat the error as a tool result so the conversation can continue
+            const errorMessage = `Error executing tool "${toolSelection.tool}": ${toolError instanceof Error ? toolError.message : 'Unknown error'}`;
+            
+            const messagesWithTool = [
+              ...messages,
+              {
+                role: 'assistant',
+                content: {
+                  tool: toolSelection.tool,
+                  prompt: toolSelection.prompt,
+                  args: JSON.stringify(toolSelection.args),
+                  results: errorMessage
+                }
+              }
+            ];
+
+            // Recursively call handleRequest with error result
+            return this.handleRequest(
+              messagesWithTool,
+              res,
+              temperature,
+              maxTokens,
+              tools,
+              projectFileStructureGetter,
+              defaultTemperature,
+              defaultMaxTokens
+            );
+          }
+        } else {
+          // Ask for permission for potentially unsafe tools
+          this.logger.info(`Asking permission for potentially unsafe tool: ${toolSelection.tool}`);
+          
+          const permissionMessage = `I'd like to use the ${toolSelection.tool} tool with these parameters: ${JSON.stringify(toolSelection.args)}. This tool may modify files or system state. Would you like me to proceed? (Please respond with 'yes' to continue or 'no' to cancel)`;
+
+          this.requestProcessor.sendStreamingResponse(res, permissionMessage);
+          return;
+        }
+      }
+      
+      // No tool selection made, fall through to normal response generation
+    }
+
+    // Generate response (either with tool results or without)
     const response = await this.generateResponseWithToolResults(
       messages,
       temperature,

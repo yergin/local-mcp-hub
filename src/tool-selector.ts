@@ -257,7 +257,7 @@ export class ToolSelector {
         }
       } else {
         this.logger.info(
-          `🧠 Using full model for complex argument generation: ${toolSelection.tool}`
+          `Using full model for complex argument generation: ${toolSelection.tool}`
         );
         argsSelection = await this.generateArgsWithFullModel(toolPrompt, selectedTool, projectFileStructure);
       }
@@ -432,5 +432,12 @@ export class ToolSelector {
   private logTiming(operation: string, startTime: number, metadata?: object): void {
     const duration = Date.now() - startTime;
     this.logger.info(`Timing: ${operation} completed`, { duration: `${duration}ms`, ...metadata });
+  }
+
+  /**
+   * Get tool guidance configuration
+   */
+  getToolGuidanceConfig(): ToolGuidanceConfig {
+    return this.toolGuidance;
   }
 }
