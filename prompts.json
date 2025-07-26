@@ -23,7 +23,7 @@
   },
   "argumentGeneration": {
     "fastModel": {
-      "template": "Generate tool arguments from user request.\n\n# Current Workspace Files (non-exhaustive)\n{projectFileStructure}\n\n# User Request\n\"{userRequest}\"\n\n# Tool: {toolName}\n{toolDescription}\n\n## Parameters\n{params}\n\n# Your Response\n- DO NOT INCLUDE optional parameters that have good defaults in the JSON unless the user requests specific values\n- When setting paths for files mentioned in the user request, check whether these are listed in the current workspace files above and apply the correct paths (always relative, never starting with a backslash) as shown in current workspace files.\n- Be very generous with maximum line numbers or search results: do not feel you need to specify or put a limit on these unless asked.\n\nRespond ONLY with JSON: {\"args\": {\"param\": \"value\"}}\n\nResponse:",
+      "template": "Generate tool arguments from user request.\n\n# Current Workspace Files (non-exhaustive)\n{projectFileStructure}\n\n# User Request\n\"{userRequest}\"\n\n# Tool: {toolName}\n{toolDescription}\n\n## Parameters\n{params}\n\n# Your Response\n- DO NOT INCLUDE optional parameters that have good defaults in the JSON unless the user requests specific values\n- When setting paths for files mentioned in the user request, check whether these are listed in the current workspace files above and apply the correct paths (always relative, never starting with a backslash) as shown in current workspace files.\n\nRespond ONLY with JSON: {\"args\": {\"param\": \"value\"}}\n\nResponse:",
       "temperature": 0.1,
       "useFastModel": true
     },
