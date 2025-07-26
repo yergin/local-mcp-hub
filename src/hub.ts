@@ -46,14 +46,14 @@ interface PromptsConfig {
     argumentHints?: Record<string, Record<string, string>>;
   };
   responseGeneration?: {
-    planDecision?: { template?: string };
-    planIteration?: { template?: string };
-    finalIteration?: { template?: string };
-    stepLimitIteration?: { template?: string };
-    currentStep?: { template?: string };
-    planDecisionAssistant?: { template?: string };
-    previousTool?: { template?: string };
-    previousStep?: { template?: string };
+    planDecision?: { template?: string; temperature?: number; maxTokens?: number };
+    planIteration?: { template?: string; temperature?: number; maxTokens?: number };
+    finalIteration?: { template?: string; temperature?: number; maxTokens?: number };
+    stepLimitIteration?: { template?: string; temperature?: number; maxTokens?: number };
+    currentStep?: { template?: string; temperature?: number; maxTokens?: number };
+    planDecisionAssistant?: { template?: string; temperature?: number; maxTokens?: number };
+    previousTool?: { template?: string; temperature?: number; maxTokens?: number };
+    previousStep?: { template?: string; temperature?: number; maxTokens?: number };
   };
   systemMessages?: {
     customSystemPrompt?: { template?: string; enabled?: boolean };
@@ -70,6 +70,8 @@ interface Config {
     port: number;
     log_level?: string;
     cors_origins: string[];
+    default_temperature?: number;
+    default_max_tokens?: number;
   };
   mcps: MCPConfig;
 }
@@ -208,6 +210,29 @@ class LocalMCPHub {
 
   private getTmpPath(...segments: string[]): string {
     return path.join(__dirname, '..', '.tmp', ...segments);
+  }
+
+  /**
+   * Generic method to get temperature and maxTokens from prompt config with fallbacks
+   * @param promptConfig The specific prompt configuration object
+   * @param requestTemperature Temperature from HTTP request (fallback)
+   * @param requestMaxTokens MaxTokens from HTTP request (fallback)
+   * @returns Object with temperature and maxTokens values
+   */
+  private getPromptParameters(
+    promptConfig: { temperature?: number; maxTokens?: number } | undefined,
+    requestTemperature: number,
+    requestMaxTokens: number
+  ): { temperature: number; maxTokens: number } {
+    const temperature = promptConfig?.temperature ?? 
+                       this.config.hub.default_temperature ?? 
+                       requestTemperature;
+                       
+    const maxTokens = promptConfig?.maxTokens ?? 
+                     this.config.hub.default_max_tokens ?? 
+                     requestMaxTokens;
+    
+    return { temperature, maxTokens };
   }
 
   private async getProjectFileStructure(forceRefresh: boolean = false): Promise<string> {
@@ -426,10 +451,16 @@ class LocalMCPHub {
           
           const projectFileStructure = await this.getProjectFileStructure();
           
+          const planDecisionParams = this.getPromptParameters(
+            this.prompts.responseGeneration?.planDecision,
+            temperature,
+            max_tokens
+          );
+          
           const response = await this.requestProcessor.generateResponseWithToolResults(
             messages,
-            temperature,
-            max_tokens,
+            planDecisionParams.temperature,
+            planDecisionParams.maxTokens,
             mcpTools,
             projectFileStructure
           );
@@ -524,10 +555,16 @@ class LocalMCPHub {
                   maxTokens: max_tokens
                 });
 
+                const planDecisionParams = this.getPromptParameters(
+                  this.prompts.responseGeneration?.planDecision,
+                  temperature,
+                  max_tokens
+                );
+                
                 const response = await this.requestProcessor.generateResponseWithToolResults(
                   messagesWithTool,
-                  temperature,
-                  max_tokens,
+                  planDecisionParams.temperature,
+                  planDecisionParams.maxTokens,
                   mcpTools,
                   projectFileStructure
                 );
@@ -1295,10 +1332,12 @@ class LocalMCPHub {
         
         // Use finalIteration template if this is the last iteration
         let planIterationPrompt: string;
+        let currentPromptConfig: { temperature?: number; maxTokens?: number } | undefined;
         const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
         
         if (totalIterationCount >= totalIterationLimit || stepIterationCount >= stepIterationLimit) {
           // Use finalIteration for hard iteration limits
+          currentPromptConfig = this.prompts.responseGeneration?.finalIteration;
           const templateVariables: Record<string, string> = {
             systemPrompt: systemPrompt,
             projectFileStructure: projectFileStructure,
@@ -1326,12 +1365,14 @@ class LocalMCPHub {
           
           const stepLimitTemplate = this.prompts.responseGeneration?.stepLimitIteration?.template;
           if (stepLimitTemplate) {
+            currentPromptConfig = this.prompts.responseGeneration?.stepLimitIteration;
             planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
               stepLimitTemplate,
               templateVariables
             );
           } else {
             // Fallback to finalIteration if stepLimitIteration is not defined
+            currentPromptConfig = this.prompts.responseGeneration?.finalIteration;
             planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
               this.prompts.responseGeneration!.finalIteration!.template!,
               templateVariables
@@ -1339,6 +1380,7 @@ class LocalMCPHub {
           }
         } else {
           // Prepare template variables for regular iteration
+          currentPromptConfig = this.prompts.responseGeneration?.planIteration;
           const templateVariables: Record<string, string> = {
             systemPrompt: systemPrompt,
             projectFileStructure: projectFileStructure,
@@ -1365,14 +1407,18 @@ class LocalMCPHub {
           promptLength: planIterationPrompt.length
         });
 
+        // Get temperature and maxTokens using generic method
+        const promptParams = this.getPromptParameters(currentPromptConfig, temperature, maxTokens);
+        
         // Generate next plan iteration
         logger.debug('PLAN ITERATION OLLAMA CALL START', {
           prompt: planIterationPrompt,
-          temperature: temperature,
-          maxTokens: maxTokens
+          temperature: promptParams.temperature,
+          maxTokens: promptParams.maxTokens,
+          configUsed: currentPromptConfig ? 'prompt-specific' : 'defaults'
         });
 
-        const response = await this.ollamaClient.sendToOllama(planIterationPrompt, temperature, maxTokens);
+        const response = await this.ollamaClient.sendToOllama(planIterationPrompt, promptParams.temperature, promptParams.maxTokens);
 
         logger.debug('PLAN ITERATION OLLAMA RESPONSE', {
           responseLength: response.length,
@@ -1440,6 +1486,65 @@ class LocalMCPHub {
               toolCalls: executionState.currentStepToolCalls
             };
             executionState.completedSteps.push(completedStep);
+          }
+          
+          // Check if we've reached the step limit
+          if (executionState.completedSteps.length >= stepLimit) {
+            // Step limit reached - ignore next_step and send final iteration
+            logger.debug('PLAN STEP LIMIT REACHED', {
+              completedStepsCount: executionState.completedSteps.length,
+              stepLimit: stepLimit,
+              ignoringNextStep: stepCompleteResponse.next_step
+            });
+            
+            // Stream step completion without next step header
+            this.requestProcessor.streamStepCompletion(
+              res,
+              stepCompleteResponse.current_step.notes_to_future_self,
+              undefined, // No next step header
+              streamContext
+            );
+            
+            // Send final iteration prompt to get conclusion
+            const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
+            const projectFileStructure = await this.getProjectFileStructure(true);
+            const userMessage = originalMessages.find(msg => msg.role === 'user');
+            const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
+            const completedStepsText = this.requestProcessor.formatCompletedStepsWithTemplates(executionState.completedSteps);
+            
+            const templateVariables: Record<string, string> = {
+              systemPrompt: systemPrompt,
+              projectFileStructure: projectFileStructure,
+              userPrompt: userPrompt,
+              objective: executionState.objective,
+              completedSteps: completedStepsText
+            };
+            
+            const finalIterationPrompt = this.requestProcessor.replaceTemplateVariables(
+              this.prompts.responseGeneration!.finalIteration!.template!,
+              templateVariables
+            );
+            
+            const finalPromptParams = this.getPromptParameters(
+              this.prompts.responseGeneration?.finalIteration,
+              temperature,
+              maxTokens
+            );
+            
+            logger.debug('PLAN FINAL ITERATION DUE TO STEP LIMIT', {
+              completedStepsCount: executionState.completedSteps.length,
+              stepLimit: stepLimit,
+              promptLength: finalIterationPrompt.length
+            });
+            
+            const finalResponse = await this.ollamaClient.sendToOllama(
+              finalIterationPrompt, 
+              finalPromptParams.temperature, 
+              finalPromptParams.maxTokens
+            );
+            
+            this.requestProcessor.streamFinalConclusion(res, finalResponse, streamContext);
+            break;
           }
           
           // Set the next step as current and reset step tracking
