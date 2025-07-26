@@ -525,6 +525,7 @@ export class PlanExecutorV1 implements PlanExecutor {
     );
 
     let toolResult: string;
+    let actualArgs: any = {};
 
     if (!currentTool) {
       this.logger.error(`Tool not found: ${executionState.currentStep!.tool}`);
@@ -552,7 +553,7 @@ export class PlanExecutorV1 implements PlanExecutor {
           throw new Error(`Tool argument generation failed: ${toolSelectionError instanceof Error ? toolSelectionError.message : 'Unknown error'}`);
         }
 
-        const actualArgs = toolArgs && typeof toolArgs === 'object' && 'args' in toolArgs ? toolArgs.args : toolArgs;
+        actualArgs = toolArgs && typeof toolArgs === 'object' && 'args' in toolArgs ? toolArgs.args : toolArgs;
 
         toolResult = await this.mcpManager.callMCPTool(
           executionState.currentStep!.tool,
@@ -568,14 +569,14 @@ export class PlanExecutorV1 implements PlanExecutor {
     executionState.currentStepAssistant = {
       tool: executionState.currentStep!.tool,
       prompt: executionState.currentStep!.prompt,
-      args: JSON.stringify({}),
+      args: JSON.stringify(actualArgs),
       results: toolResult
     };
 
     executionState.currentStepToolCalls.push({
       prompt: executionState.currentStep!.prompt,
       tool: executionState.currentStep!.tool,
-      args: JSON.stringify({})
+      args: JSON.stringify(actualArgs)
     });
 
     return toolResult;
