@@ -8,7 +8,8 @@
     "port": 3002,
     "cors_origins": ["*"],
     "default_temperature": 0.1,
-    "default_max_tokens": 4000
+    "default_max_tokens": 4000,
+    "executor": "v1"
   },
   "mcps": {
     "enabled": ["serena", "context7"],

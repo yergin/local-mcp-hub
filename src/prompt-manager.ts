@@ -13,6 +13,7 @@ export interface PromptTemplates {
   'toolSelection.stage1'?: PromptTemplate;
   
   // Plan execution
+  'responseGeneration.parallelTasks'?: PromptTemplate;
   'responseGeneration.planDecision'?: PromptTemplate;
   'responseGeneration.planIteration'?: PromptTemplate;
   'responseGeneration.finalIteration'?: PromptTemplate;

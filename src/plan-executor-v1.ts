@@ -3,17 +3,97 @@ import { OllamaClient } from './ollama-client';
 import { ToolSelector } from './tool-selector';
 import { MCPManager, OpenAITool } from './mcp-manager';
 import { PromptManager } from './prompt-manager';
+import { PlanExecutor } from './plan-executor';
 import { 
   RequestProcessor, 
-  PlanResponse, 
-  PlanExecutionState, 
-  CompletedStepRequest,
-  CurrentStepIterationResponse,
-  CurrentStepCompleteResponse,
-  NextStepResponse,
-  AssistantToolResult,
-  ToolCallRecord
+  AssistantToolResult
 } from './request-processor';
+
+// Step-related interfaces (moved from RequestProcessor)
+export interface CurrentStepIterationResponse {
+  current_step: {
+    notes_to_future_self: string;
+    tool: string;
+    prompt: string;
+  };
+  later_steps?: string[];
+}
+
+export interface CurrentStepCompleteResponse {
+  current_step: {
+    completed: true;
+    success: boolean;
+    notes_to_future_self: string;
+  };
+  next_step?: {
+    objective: string;
+    tool: string;
+    prompt: string;
+  };
+  later_steps?: string[];
+}
+
+export interface NextStepResponse {
+  objective: string;
+  tool: string;
+  prompt: string;
+}
+
+export interface ToolCallRecord {
+  prompt: string;
+  tool: string;
+  args: string; // JSON stringified
+}
+
+export interface CompletedStepRequest {
+  objective: string;
+  success: boolean;
+  conclusion: string;
+  toolCalls: ToolCallRecord[];
+}
+
+export interface CurrentStepRequest {
+  objective: string;
+  completed: boolean;
+  notes: string; // notes_to_future_self
+  assistant: AssistantToolResult;
+}
+
+// Plan-specific interfaces
+export interface PlanStep {
+  purpose: string;
+  tool: string;
+  prompt: string;
+}
+
+export interface PlanResponse {
+  main_objective: string;
+  conclusion_from_junior_assistant_data?: string;
+  junior_assistant_data_was_helpful?: boolean;
+  next_step?: NextStepResponse;
+  later_steps: string[];
+}
+
+export interface PlanExecutionState {
+  objective: string;
+  completedSteps: CompletedStepRequest[];
+  currentStep?: NextStepResponse;
+  currentStepNotes?: string; // notes_to_future_self from previous iterations
+  currentStepAssistant?: AssistantToolResult; // current tool result for current step
+  currentStepToolCalls: ToolCallRecord[]; // track all tool calls for current step
+  laterSteps: string[];
+  stepResults: string[];
+}
+
+export interface ResponseGenerationConfig {
+  planDecision?: { template?: string };
+  planIteration?: { template?: string };
+  finalIteration?: { template?: string };
+  stepLimitIteration?: { template?: string };
+  planDecisionAssistant?: { template?: string };
+  previousTool?: { template?: string };
+  previousStep?: { template?: string };
+}
 
 export interface PlanExecutorConfig {
   stepLimit: number;
@@ -21,7 +101,7 @@ export interface PlanExecutorConfig {
   stepIterationLimit: number;
 }
 
-export class PlanExecutorV1 {
+export class PlanExecutorV1 implements PlanExecutor {
   private logger: winston.Logger;
   private ollamaClient: OllamaClient;
   private toolSelector: ToolSelector;
@@ -54,9 +134,11 @@ export class PlanExecutorV1 {
   isPlanResponse(response: string): boolean {
     this.logger.debug('PLAN DETECTION ATTEMPT', {
       responseLength: response.length,
-      responsePreview: response.substring(0, 200) + '...'
+      responsePreview: response.substring(0, 200) + '...',
+      fullResponse: response
     });
 
+    // Check if the response contains plan structure
     try {
       const parsed = JSON.parse(response.trim());
       const isPlan = parsed && 
@@ -67,21 +149,55 @@ export class PlanExecutorV1 {
                parsed.next_step.tool && 
                parsed.next_step.prompt));
 
-      this.logger.debug('PLAN DETECTION (DIRECT JSON)', { isPlan });
+      this.logger.debug('PLAN DETECTION (DIRECT JSON)', {
+        isPlan: isPlan,
+        hasMainObjective: typeof parsed?.main_objective === 'string',
+        hasLaterSteps: Array.isArray(parsed?.later_steps),
+        hasValidNextStep: parsed.next_step === undefined || 
+          (typeof parsed.next_step === 'object' && parsed.next_step.tool && parsed.next_step.prompt),
+        parsedStructure: parsed
+      });
+
       return isPlan;
     } catch (parseError) {
-      // Try to find plan structure in text
+      this.logger.debug('PLAN DETECTION (DIRECT JSON FAILED)', {
+        parseError: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+
+      // Try to find plan structure in text that might contain other content
       const jsonMatch = response.match(/\{[\s\S]*"main_objective"[\s\S]*\}/);
       if (jsonMatch) {
+        this.logger.debug('PLAN DETECTION (EXTRACTED JSON)', {
+          extractedJson: jsonMatch[0],
+          jsonLength: jsonMatch[0].length
+        });
+
         try {
           const parsed = JSON.parse(jsonMatch[0]);
-          return parsed && 
+          const isPlan = parsed && 
                  typeof parsed.main_objective === 'string' && 
                  Array.isArray(parsed.later_steps);
-        } catch {
+
+          this.logger.debug('PLAN DETECTION (EXTRACTED JSON RESULT)', {
+            isPlan: isPlan,
+            hasMainObjective: typeof parsed?.main_objective === 'string',
+            hasLaterSteps: Array.isArray(parsed?.later_steps),
+            parsedStructure: parsed
+          });
+
+          return isPlan;
+        } catch (extractParseError) {
+          this.logger.debug('PLAN DETECTION (EXTRACTED JSON FAILED)', {
+            extractParseError: extractParseError instanceof Error ? extractParseError.message : 'Unknown parse error'
+          });
           return false;
         }
       }
+
+      this.logger.debug('PLAN DETECTION (NO JSON FOUND)', {
+        responseContainsMainObjective: response.includes('main_objective'),
+        responseContainsPlan: response.includes('plan')
+      });
       return false;
     }
   }
@@ -90,28 +206,138 @@ export class PlanExecutorV1 {
    * Extracts plan from response
    */
   extractPlanFromResponse(response: string): PlanResponse | null {
+    this.logger.debug('PLAN EXTRACTION ATTEMPT', {
+      responseLength: response.length,
+      responsePreview: response.substring(0, 200) + '...'
+    });
+
     try {
       const parsed = JSON.parse(response.trim());
       if (this.isPlanResponse(response)) {
+        this.logger.debug('PLAN EXTRACTION SUCCESS (DIRECT JSON)', {
+          extractedPlan: parsed,
+          objective: parsed.main_objective,
+          stepsCount: parsed.later_steps?.length || 0,
+          hasNextStep: !!parsed.next_step
+        });
         return parsed as PlanResponse;
       }
-    } catch {
+    } catch (parseError) {
+      this.logger.debug('PLAN EXTRACTION (DIRECT JSON FAILED)', {
+        parseError: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+
       // Try to extract JSON from mixed content
       const jsonMatch = response.match(/\{[\s\S]*"main_objective"[\s\S]*\}/);
       if (jsonMatch) {
+        this.logger.debug('PLAN EXTRACTION (TRYING EXTRACTED JSON)', {
+          extractedJsonLength: jsonMatch[0].length,
+          extractedJson: jsonMatch[0]
+        });
+
         try {
           const parsed = JSON.parse(jsonMatch[0]);
           if (parsed && 
               typeof parsed.main_objective === 'string' && 
               Array.isArray(parsed.later_steps)) {
+            this.logger.debug('PLAN EXTRACTION SUCCESS (EXTRACTED JSON)', {
+              extractedPlan: parsed,
+              objective: parsed.main_objective,
+              stepsCount: parsed.later_steps?.length || 0,
+              hasNextStep: !!parsed.next_step
+            });
             return parsed as PlanResponse;
           }
-        } catch {
+        } catch (extractParseError) {
+          this.logger.debug('PLAN EXTRACTION (EXTRACTED JSON FAILED)', {
+            extractParseError: extractParseError instanceof Error ? extractParseError.message : 'Unknown parse error'
+          });
           return null;
         }
       }
     }
+
+    this.logger.debug('PLAN EXTRACTION FAILED', {
+      reason: 'No valid plan structure found in response'
+    });
     return null;
+  }
+
+  /**
+   * Handle a request (implements PlanExecutor interface)
+   */
+  async handleRequest(
+    messages: any[],
+    res: any,
+    temperature: number,
+    maxTokens: number,
+    tools: OpenAITool[],
+    projectFileStructureGetter: (forceRefresh?: boolean) => Promise<string>,
+    defaultTemperature?: number,
+    defaultMaxTokens?: number
+  ): Promise<void> {
+    // Generate response first
+    const response = await this.generateResponseWithToolResults(
+      messages,
+      temperature,
+      maxTokens,
+      tools,
+      await projectFileStructureGetter()
+    );
+
+    // Try to handle as plan, if not a plan then stream normal response
+    const planHandled = await this.handleResponseOrPlan(
+      response,
+      messages,
+      res,
+      temperature,
+      maxTokens,
+      projectFileStructureGetter,
+      defaultTemperature,
+      defaultMaxTokens
+    );
+
+    if (!planHandled) {
+      this.requestProcessor.sendStreamingResponse(res, response);
+    }
+  }
+
+  /**
+   * Handle response - detect if it's a plan and execute if so
+   * Returns true if a plan was detected and executed, false otherwise
+   */
+  async handleResponseOrPlan(
+    response: string,
+    originalMessages: any[],
+    res: any,
+    temperature: number,
+    maxTokens: number,
+    projectFileStructureGetter: (forceRefresh?: boolean) => Promise<string>,
+    defaultTemperature?: number,
+    defaultMaxTokens?: number
+  ): Promise<boolean> {
+    if (this.isPlanResponse(response)) {
+      const plan = this.extractPlanFromResponse(response);
+      if (plan && plan.next_step) {
+        this.logger.info('Plan detected by V1 executor, starting execution', {
+          objective: plan.main_objective,
+          stepsCount: plan.later_steps?.length || 0
+        });
+
+        await this.executePlan(
+          originalMessages,
+          plan,
+          temperature,
+          maxTokens,
+          res,
+          projectFileStructureGetter,
+          defaultTemperature,
+          defaultMaxTokens
+        );
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -127,7 +353,7 @@ export class PlanExecutorV1 {
     defaultTemperature?: number,
     defaultMaxTokens?: number
   ): Promise<void> {
-    const streamContext = this.requestProcessor.streamPlanResponse(res, initialPlan);
+    const streamContext = this.streamPlanResponse(res, initialPlan);
     
     let executionState = this.initializeExecutionState(originalMessages, initialPlan);
     
@@ -181,7 +407,7 @@ export class PlanExecutorV1 {
 
         // Handle response based on prompt type
         if (this.isFinalIteration(totalIterationCount, stepIterationCount)) {
-          this.requestProcessor.streamFinalConclusion(res, response, streamContext);
+          this.streamFinalConclusion(res, response, streamContext);
           break;
         }
 
@@ -224,7 +450,7 @@ export class PlanExecutorV1 {
           );
         } else {
           const errorMessage = `Error in step "${executionState.currentStep!.objective}": ${error instanceof Error ? error.message : 'Unknown error'}`;
-          this.requestProcessor.streamFinalConclusion(res, errorMessage, streamContext);
+          this.streamFinalConclusion(res, errorMessage, streamContext);
         }
         break;
       }
@@ -352,7 +578,7 @@ export class PlanExecutorV1 {
     const userMessage = originalMessages.find(msg => msg.role === 'user');
     const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
     const projectFileStructure = await projectFileStructureGetter(true); // Force refresh for plan iteration
-    const systemPrompt = this.promptManager.getTemplateString('systemMessages.customSystemPrompt') || '';
+    const systemPrompt = this.promptManager.getTemplateString('systemMessages.customSystemPrompt')!;
 
     // Select appropriate prompt template
     if (this.isFinalIteration(totalIterationCount, stepIterationCount)) {
@@ -370,7 +596,7 @@ export class PlanExecutorV1 {
     projectFileStructure: string,
     systemPrompt: string
   ): { prompt: string; promptConfig: any } {
-    const completedStepsText = this.requestProcessor.formatCompletedStepsWithTemplates(executionState.completedSteps);
+    const completedStepsText = this.formatCompletedStepsWithTemplates(executionState.completedSteps);
     
     const templateVariables: Record<string, string> = {
       systemPrompt,
@@ -395,7 +621,7 @@ export class PlanExecutorV1 {
     projectFileStructure: string,
     systemPrompt: string
   ): { prompt: string; promptConfig: any } {
-    const completedStepsText = this.requestProcessor.formatCompletedStepsWithTemplates(executionState.completedSteps);
+    const completedStepsText = this.formatCompletedStepsWithTemplates(executionState.completedSteps);
     const currentStepText = this.formatCurrentStep(executionState);
     const nextStepsText = this.formatNextSteps(executionState.laterSteps);
     const toolNamesAndHints = this.getToolNamesAndHints();
@@ -427,7 +653,7 @@ export class PlanExecutorV1 {
     projectFileStructure: string,
     systemPrompt: string
   ): { prompt: string; promptConfig: any } {
-    const completedStepsText = this.requestProcessor.formatCompletedStepsWithTemplates(executionState.completedSteps);
+    const completedStepsText = this.formatCompletedStepsWithTemplates(executionState.completedSteps);
     const currentStepText = this.formatCurrentStep(executionState);
     const nextStepsText = this.formatNextSteps(executionState.laterSteps);
     const toolNamesAndHints = this.getToolNamesAndHints();
@@ -467,7 +693,7 @@ export class PlanExecutorV1 {
     
     const notesLine = currentStepRequest.notes && currentStepRequest.notes.trim() || "*No notes yet*";
     
-    const previousToolTemplate = this.promptManager.getTemplateString('responseGeneration.previousTool') || '';
+    const previousToolTemplate = this.promptManager.getTemplateString('responseGeneration.previousTool')!;
     const previousToolCalls = executionState.currentStepToolCalls.slice(0, -1);
     const previousToolList = previousToolCalls.map(toolCall => {
       const toolVariables: Record<string, string> = {
@@ -478,7 +704,7 @@ export class PlanExecutorV1 {
       return this.requestProcessor.replaceTemplateVariables(previousToolTemplate, toolVariables);
     }).join('\n');
     
-    const currentStepTemplate = this.promptManager.getTemplateString('responseGeneration.currentStep') || '';
+    const currentStepTemplate = this.promptManager.getTemplateString('responseGeneration.currentStep')!;
     const currentStepNumber = executionState.completedSteps.length + 1;
     const currentStepVariables: Record<string, string> = {
       stepNumber: currentStepNumber.toString(),
@@ -518,17 +744,17 @@ export class PlanExecutorV1 {
     defaultTemperature?: number,
     defaultMaxTokens?: number
   ): Promise<'continue' | 'break' | 'reset_step_counter'> {
-    const iterationResponse = this.requestProcessor.parseIterationResponse(response);
+    const iterationResponse = this.parseIterationResponse(response);
     
     if (iterationResponse === null) {
       // Malformed response
-      this.requestProcessor.streamFinalConclusion(res, 'Plan execution ended due to malformed response.', streamContext);
+      this.streamFinalConclusion(res, 'Plan execution ended due to malformed response.', streamContext);
       return 'break';
     }
     
     if (typeof iterationResponse === 'string') {
       // Final conclusion reached
-      this.requestProcessor.streamFinalConclusion(res, iterationResponse, streamContext);
+      this.streamFinalConclusion(res, iterationResponse, streamContext);
       return 'break';
     }
     
@@ -537,7 +763,7 @@ export class PlanExecutorV1 {
       const stepCompleteResponse = iterationResponse as CurrentStepCompleteResponse;
       
       if (!stepCompleteResponse.next_step) {
-        this.requestProcessor.streamFinalConclusion(res, stepCompleteResponse.current_step.notes_to_future_self, streamContext);
+        this.streamFinalConclusion(res, stepCompleteResponse.current_step.notes_to_future_self, streamContext);
         return 'break';
       }
       
@@ -580,7 +806,7 @@ export class PlanExecutorV1 {
       executionState.currentStepAssistant = undefined;
       executionState.currentStepToolCalls = [];
       
-      this.requestProcessor.streamStepCompletion(
+      this.streamStepCompletion(
         res,
         stepCompleteResponse.current_step.notes_to_future_self,
         executionState.currentStep,
@@ -604,7 +830,7 @@ export class PlanExecutorV1 {
         executionState.currentStepNotes = stepIterationResponse.current_step.notes_to_future_self;
       }
       
-      this.requestProcessor.streamStepCompletion(
+      this.streamStepCompletion(
         res,
         stepIterationResponse.current_step.notes_to_future_self,
         undefined,
@@ -634,7 +860,7 @@ export class PlanExecutorV1 {
     });
     
     // Stream step completion without next step header
-    this.requestProcessor.streamStepCompletion(
+    this.streamStepCompletion(
       res,
       stepCompleteResponse.current_step.notes_to_future_self,
       undefined,
@@ -663,7 +889,7 @@ export class PlanExecutorV1 {
       finalPromptParams.maxTokens
     );
     
-    this.requestProcessor.streamFinalConclusion(res, finalResponse, streamContext);
+    this.streamFinalConclusion(res, finalResponse, streamContext);
   }
 
   private isFinalIteration(totalIterationCount: number, stepIterationCount: number): boolean {
@@ -694,6 +920,409 @@ export class PlanExecutorV1 {
   }
 
   /**
+   * Format completed steps using templates from prompts.json (moved from RequestProcessor)
+   */
+  formatCompletedStepsWithTemplates(completedSteps: CompletedStepRequest[]): string {
+    if (completedSteps.length === 0) {
+      return 'None';
+    }
+
+    const previousToolTemplate = this.promptManager.getTemplateString('responseGeneration.previousTool')!;
+    const previousStepTemplate = this.promptManager.getTemplateString('responseGeneration.previousStep')!;
+
+    return completedSteps.map((step, i) => {
+      // Format all tool calls for this step
+      const previousToolList = step.toolCalls.map(toolCall => {
+        const toolVariables: Record<string, string> = {
+          prompt: toolCall.prompt,
+          tool: toolCall.tool,
+          args: toolCall.args
+        };
+        return this.requestProcessor.replaceTemplateVariables(previousToolTemplate, toolVariables);
+      }).join('\n');
+
+      // Format the step using previousStep template
+      const stepVariables: Record<string, string> = {
+        stepNumber: (i + 1).toString(),
+        objective: step.objective,
+        success: step.success ? 'Yes' : 'No',
+        previousToolList: previousToolList,
+        conclusion: step.conclusion
+      };
+
+      return this.requestProcessor.replaceTemplateVariables(previousStepTemplate, stepVariables);
+    }).join('\n\n');
+  }
+
+  /**
+   * Generate response using plan decision template (moved from RequestProcessor)
+   */
+  async generateResponseWithToolResults(
+    messages: any[],
+    temperature: number,
+    maxTokens: number,
+    tools?: OpenAITool[],
+    projectFileStructure?: string
+  ): Promise<string> {
+    // Get the plan decision template
+    const planDecisionTemplate = this.promptManager.getTemplateString('responseGeneration.planDecision')!;
+    
+    // Extract userPrompt from messages
+    const userMessage = messages.find(msg => msg.role === 'user');
+    const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
+    
+    // Create assistantContext from assistant tool usage using template
+    const assistantMessages = messages.filter(msg => msg.role === 'assistant');
+    const planDecisionAssistantTemplate = this.promptManager.getTemplateString('responseGeneration.planDecisionAssistant')!;
+
+    const assistantContext = assistantMessages.map(msg => {
+      if (typeof msg.content === 'object' && msg.content.tool) {
+        const assistantResult = msg.content as AssistantToolResult;
+        const formattedResults = this.requestProcessor.formatToolResultsAsBlockQuote(assistantResult.results);
+        
+        const assistantVariables: Record<string, string> = {
+          prompt: assistantResult.prompt,
+          tool: assistantResult.tool,
+          args: assistantResult.args,
+          results: formattedResults
+        };
+        
+        return this.requestProcessor.replaceTemplateVariables(planDecisionAssistantTemplate, assistantVariables);
+      }
+      return msg.content;
+    }).join('\n\n');
+    
+    // Prepare template variables
+    const templateVariables: Record<string, string> = {
+      systemPrompt: this.promptManager.getTemplateString('systemMessages.customSystemPrompt')!,
+      projectFileStructure: projectFileStructure || '',
+      userPrompt: userPrompt,
+      planDecisionAssistant: assistantContext
+    };
+    
+    // Add tools if provided
+    if (tools && tools.length > 0) {
+      templateVariables.toolNamesAndHints = this.toolSelector.formatToolsWithUsageHints(tools);
+    } else {
+      // Remove the tools section from template if no tools provided
+      templateVariables.toolNamesAndHints = '';
+    }
+    
+    // Replace all template variables
+    let prompt = this.requestProcessor.replaceTemplateVariables(planDecisionTemplate, templateVariables);
+    
+    // Remove empty sections (like the tools section when no tools are provided)
+    prompt = prompt.replace('\n\nAvailable tools:\n\n', '');
+
+    // Debug logging: Final response generation prompt
+    this.logger.debug('PLAN DECISION PROMPT (TOOL RESULTS)', {
+      originalMessageCount: messages.length,
+      finalPrompt: prompt,
+      promptLength: prompt.length,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      toolsProvided: tools ? tools.length : 0,
+      hasProjectFileStructure: !!projectFileStructure
+    });
+
+    return await this.ollamaClient.sendToOllama(prompt, temperature, maxTokens);
+  }
+
+  /**
+   * Parse iteration response (moved from RequestProcessor)
+   */
+  parseIterationResponse(response: string): CurrentStepIterationResponse | CurrentStepCompleteResponse | string | null {
+    this.logger.debug('ITERATION RESPONSE PARSING ATTEMPT', {
+      responseLength: response.length,
+      responsePreview: response.substring(0, 200) + '...'
+    });
+
+    try {
+      const parsed = JSON.parse(response.trim());
+      
+      // Check for Option A: continue_with_current_step
+      if (parsed.continue_with_current_step) {
+        const continueStep = parsed.continue_with_current_step;
+        const iterationResponse: CurrentStepIterationResponse = {
+          current_step: {
+            notes_to_future_self: continueStep.notes_to_future_self || '',
+            tool: continueStep.tool,
+            prompt: continueStep.prompt
+          },
+          later_steps: parsed.later_steps
+        };
+        
+        this.logger.debug('ITERATION RESPONSE: Continue with current step (Option A)', {
+          response: iterationResponse
+        });
+        
+        return iterationResponse;
+      }
+      
+      // Check for Option B: wrap_up_current_step + new_step
+      if (parsed.wrap_up_current_step && parsed.new_step) {
+        const wrapUp = parsed.wrap_up_current_step;
+        const newStep = parsed.new_step;
+        const completeResponse: CurrentStepCompleteResponse = {
+          current_step: {
+            completed: true,
+            success: wrapUp.success || false,
+            notes_to_future_self: wrapUp.notes_to_future_self || ''
+          },
+          next_step: {
+            objective: newStep.objective,
+            tool: newStep.tool,
+            prompt: newStep.prompt
+          },
+          later_steps: parsed.later_steps
+        };
+        
+        this.logger.debug('ITERATION RESPONSE: Wrap up current step and start new (Option B)', {
+          response: completeResponse,
+          hasNextStep: true
+        });
+        
+        return completeResponse;
+      }
+      
+      // If neither pattern matches, treat as final conclusion
+      this.logger.debug('ITERATION RESPONSE: JSON parsed but no expected structure found, treating as final conclusion', {
+        parsedStructure: parsed
+      });
+      return response.trim();
+      
+    } catch (parseError) {
+      this.logger.debug('ITERATION RESPONSE (DIRECT JSON FAILED)', {
+        parseError: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+
+      // Try to extract JSON from markdown code blocks
+      const jsonMatch = response.match(/```json\s*\n?([\s\S]*?)\n?```/);
+      if (jsonMatch) {
+        this.logger.debug('ITERATION RESPONSE (EXTRACTED JSON FROM MARKDOWN)', {
+          extractedJson: jsonMatch[1],
+          jsonLength: jsonMatch[1].length
+        });
+
+        try {
+          const parsed = JSON.parse(jsonMatch[1].trim());
+          
+          // Check for Option A: continue_with_current_step
+          if (parsed.continue_with_current_step) {
+            const continueStep = parsed.continue_with_current_step;
+            const iterationResponse: CurrentStepIterationResponse = {
+              current_step: {
+                notes_to_future_self: continueStep.notes_to_future_self || '',
+                tool: continueStep.tool,
+                prompt: continueStep.prompt
+              },
+              later_steps: parsed.later_steps
+            };
+            
+            this.logger.debug('ITERATION RESPONSE: Continue with current step (Option A) (from markdown)', {
+              response: iterationResponse
+            });
+            
+            return iterationResponse;
+          }
+          
+          // Check for Option B: wrap_up_current_step + new_step
+          if (parsed.wrap_up_current_step && parsed.new_step) {
+            const wrapUp = parsed.wrap_up_current_step;
+            const newStep = parsed.new_step;
+            const completeResponse: CurrentStepCompleteResponse = {
+              current_step: {
+                completed: true,
+                success: wrapUp.success || false,
+                notes_to_future_self: wrapUp.notes_to_future_self || ''
+              },
+              next_step: {
+                objective: newStep.objective,
+                tool: newStep.tool,
+                prompt: newStep.prompt
+              },
+              later_steps: parsed.later_steps
+            };
+            
+            this.logger.debug('ITERATION RESPONSE: Wrap up current step and start new (Option B) (from markdown)', {
+              response: completeResponse,
+              hasNextStep: true
+            });
+            
+            return completeResponse;
+          }
+          
+          // If neither pattern matches, treat as final conclusion
+          this.logger.debug('ITERATION RESPONSE: JSON from markdown parsed but no expected structure found, treating as final conclusion', {
+            parsedStructure: parsed
+          });
+          return response.trim();
+          
+        } catch (extractParseError) {
+          this.logger.debug('ITERATION RESPONSE (EXTRACTED JSON FAILED)', {
+            extractParseError: extractParseError instanceof Error ? extractParseError.message : 'Unknown parse error'
+          });
+        }
+      }
+
+      // Not JSON and no extractable JSON, treat as final conclusion (Option 3)
+      this.logger.debug('ITERATION RESPONSE: Final conclusion (non-JSON)', {
+        parseError: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+      return response.trim();
+    }
+  }
+
+  /**
+   * Stream plan response to Continue (moved from RequestProcessor)
+   */
+  streamPlanResponse(res: any, plan: PlanResponse, model?: string): { id: string, created: number, responseModel: string } {
+    this.logger.info('Streaming plan response to Continue');
+    this.logger.debug('PLAN STREAMING DETAILS', {
+      plan: plan,
+      objective: plan.main_objective,
+      laterStepsCount: plan.later_steps?.length || 0,
+      hasNextStep: !!plan.next_step,
+      nextStepTool: plan.next_step?.tool,
+      nextStepObjective: plan.next_step?.objective,
+      model: model
+    });
+
+    // Set SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    });
+
+    const id = `chatcmpl-${Date.now()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const responseModel = model || 'default-model';
+
+    this.logger.debug('PLAN STREAMING SSE SETUP', {
+      streamId: id,
+      created: created,
+      responseModel: responseModel
+    });
+
+    // Stream plan introduction
+    const planIntro = `A plan has been created where the objective is: ${plan.main_objective}\n\n`;
+    this.logger.debug('PLAN STREAMING INTRO', {
+      content: planIntro,
+      length: planIntro.length
+    });
+    this.requestProcessor.streamChunk(res, planIntro, id, created, responseModel);
+
+    // Stream plan steps
+    if (plan.later_steps && plan.later_steps.length > 0) {
+      plan.later_steps.forEach((step: string, index: number) => {
+        const stepText = `- ${step}\n`;
+        this.logger.debug('PLAN STREAMING STEP', {
+          stepIndex: index,
+          stepContent: stepText,
+          stepLength: stepText.length
+        });
+        this.requestProcessor.streamChunk(res, stepText, id, created, responseModel);
+      });
+    }
+
+    // Stream current step if present
+    if (plan.next_step) {
+      const stepHeader = `\n${plan.next_step.objective}\n${'-'.repeat(plan.next_step.objective.length)}\n`;
+      this.logger.debug('PLAN STREAMING NEXT STEP HEADER', {
+        stepHeader: stepHeader,
+        headerLength: stepHeader.length,
+        nextStepDetails: plan.next_step
+      });
+      this.requestProcessor.streamChunk(res, stepHeader, id, created, responseModel);
+    }
+
+    this.logger.debug('PLAN STREAMING COMPLETION', {
+      totalContentEstimate: planIntro.length + 100,
+      note: 'Stream kept open for plan execution'
+    });
+    // Don't finish the stream - keep it open for plan execution
+    // Return stream context for continued streaming
+    return { id, created, responseModel };
+  }
+
+  /**
+   * Stream step completion (moved from RequestProcessor)
+   */
+  streamStepCompletion(res: any, stepResult: string, nextStep?: NextStepResponse, streamContext?: { id: string, created: number, responseModel: string }): void {
+    this.logger.debug('STEP COMPLETION STREAMING START', {
+      stepResult: stepResult,
+      stepResultLength: stepResult.length,
+      hasNextStep: !!nextStep,
+      nextStep: nextStep,
+      streamContext: streamContext
+    });
+
+    // Use existing stream context or create new one
+    const id = streamContext?.id || `chatcmpl-${Date.now()}`;
+    const created = streamContext?.created || Math.floor(Date.now() / 1000);
+    const responseModel = streamContext?.responseModel || 'default-model';
+
+    // Stream step completion
+    if (stepResult) {
+      const completionText = stepResult + '\n\n';
+      this.logger.debug('STEP COMPLETION STREAMING RESULT', {
+        completionText: completionText,
+        completionLength: completionText.length
+      });
+      this.requestProcessor.streamChunk(res, completionText, id, created, responseModel);
+    }
+
+    // Stream next step if present
+    if (nextStep) {
+      const stepHeader = `${nextStep.objective}\n${'-'.repeat(nextStep.objective.length)}\n`;
+      this.logger.debug('STEP COMPLETION STREAMING NEXT STEP', {
+        stepHeader: stepHeader,
+        headerLength: stepHeader.length,
+        nextStepDetails: nextStep
+      });
+      this.requestProcessor.streamChunk(res, stepHeader, id, created, responseModel);
+    }
+
+    this.logger.debug('STEP COMPLETION STREAMING END');
+  }
+
+  /**
+   * Stream final conclusion (moved from RequestProcessor)
+   */
+  streamFinalConclusion(res: any, conclusion: string, streamContext?: { id: string, created: number, responseModel: string }): void {
+    this.logger.debug('FINAL CONCLUSION STREAMING START', {
+      conclusion: conclusion,
+      conclusionLength: conclusion.length,
+      streamContext: streamContext
+    });
+
+    const id = streamContext?.id || `chatcmpl-${Date.now()}`;
+    const created = streamContext?.created || Math.floor(Date.now() / 1000);
+    const responseModel = streamContext?.responseModel || 'default-model';
+
+    const header = `\nFinal conclusion reached\n${'='.repeat(25)}\n\n`;
+    this.logger.debug('FINAL CONCLUSION STREAMING HEADER', {
+      header: header,
+      headerLength: header.length
+    });
+    this.requestProcessor.streamChunk(res, header, id, created, responseModel);
+
+    this.logger.debug('FINAL CONCLUSION STREAMING CONTENT', {
+      conclusion: conclusion,
+      conclusionLength: conclusion.length
+    });
+    this.requestProcessor.streamChunk(res, conclusion, id, created, responseModel);
+
+    this.logger.debug('FINAL CONCLUSION STREAMING END', {
+      totalEstimate: conclusion.length + 50
+    });
+    this.requestProcessor.finishStream(res, id, created, responseModel, conclusion.length + 50);
+  }
+
+  /**
    * Handle emergency conclusion when tool errors occur
    */
   async handleEmergencyConclusion(
@@ -712,10 +1341,10 @@ export class PlanExecutorV1 {
     const userMessage = originalMessages.find(msg => msg.role === 'user');
     const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
     const projectFileStructure = await projectFileStructureGetter(true);
-    const systemPrompt = this.promptManager.getTemplateString('systemMessages.customSystemPrompt') || '';
+    const systemPrompt = this.promptManager.getTemplateString('systemMessages.customSystemPrompt')!;
     
     // Build error conclusion prompt
-    const completedStepsText = this.requestProcessor.formatCompletedStepsWithTemplates(executionState.completedSteps);
+    const completedStepsText = this.formatCompletedStepsWithTemplates(executionState.completedSteps);
     const currentStepText = this.formatCurrentStep(executionState);
     
     const templateVariables: Record<string, string> = {
@@ -750,7 +1379,7 @@ export class PlanExecutorV1 {
     
     // Use the existing stream context from main execution flow
     // For emergency conclusions, we'll stream the response directly
-    this.requestProcessor.streamFinalConclusion(res, response, { 
+    this.streamFinalConclusion(res, response, { 
       id: 'emergency-conclusion', 
       created: Date.now(), 
       responseModel: 'emergency' 

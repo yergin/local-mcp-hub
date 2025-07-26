@@ -12,8 +12,10 @@ import {
   ToolSelectionConfig,
   ArgumentGenerationConfig,
 } from './tool-selector';
-import { RequestProcessor, ResponseGenerationConfig, SystemMessageConfig, PlanResponse, PlanExecutionState, PlanStep, CompletedStepRequest, CurrentStepIterationResponse, CurrentStepCompleteResponse, CurrentStepRequest } from './request-processor';
-import { PlanExecutorV1, PlanExecutorConfig } from './plan-executor-v1';
+import { RequestProcessor, SystemMessageConfig } from './request-processor';
+import { PlanExecutor } from './plan-executor';
+import { PlanExecutorV1, PlanExecutorConfig, PlanResponse, ResponseGenerationConfig } from './plan-executor-v1';
+import { PlanExecutorV2, PlanExecutorV2Config } from './plan-executor-v2';
 import { PromptManager } from './prompt-manager';
 
 // Prompts configuration interfaces
@@ -48,14 +50,7 @@ interface PromptsConfig {
     argumentHints?: Record<string, Record<string, string>>;
   };
   responseGeneration?: {
-    planDecision?: { template?: string; temperature?: number; maxTokens?: number };
-    planIteration?: { template?: string; temperature?: number; maxTokens?: number };
-    finalIteration?: { template?: string; temperature?: number; maxTokens?: number };
-    stepLimitIteration?: { template?: string; temperature?: number; maxTokens?: number };
-    currentStep?: { template?: string; temperature?: number; maxTokens?: number };
-    planDecisionAssistant?: { template?: string; temperature?: number; maxTokens?: number };
-    previousTool?: { template?: string; temperature?: number; maxTokens?: number };
-    previousStep?: { template?: string; temperature?: number; maxTokens?: number };
+    parallelTasks?: { template?: string; temperature?: number; maxTokens?: number };
   };
   systemMessages?: {
     customSystemPrompt?: { template?: string; enabled?: boolean };
@@ -74,6 +69,7 @@ interface Config {
     cors_origins: string[];
     default_temperature?: number;
     default_max_tokens?: number;
+    executor?: 'v1' | 'v2'; // Which plan executor to use (defaults to 'v1' if not specified)
   };
   mcps: MCPConfig;
 }
@@ -141,6 +137,8 @@ class LocalMCPHub {
   private toolSelector: ToolSelector;
   private requestProcessor: RequestProcessor;
   private planExecutor: PlanExecutorV1;
+  private planExecutorV2: PlanExecutorV2;
+  private selectedExecutor: PlanExecutor;
   private cachedProjectFileStructure: string | null = null;
   private projectFileStructureTimestamp: number = 0;
 
@@ -171,7 +169,6 @@ class LocalMCPHub {
     );
     this.requestProcessor = new RequestProcessor(
       this.ollamaClient,
-      this.prompts.responseGeneration || {},
       this.prompts.systemMessages || {},
       this.toolSelector,
       logger
@@ -194,8 +191,39 @@ class LocalMCPHub {
       logger
     );
 
+    // Initialize V2 plan executor
+    const planExecutorV2Config: PlanExecutorV2Config = {
+      // V2 config can be empty for now
+    };
+    
+    this.planExecutorV2 = new PlanExecutorV2(
+      this.ollamaClient,
+      this.requestProcessor,
+      this.promptManager,
+      planExecutorV2Config,
+      logger
+    );
+
+    // Select which executor to use based on configuration
+    this.selectedExecutor = this.selectExecutor();
+
     this.setupMiddleware();
     this.setupRoutes();
+  }
+
+  private selectExecutor(): PlanExecutor {
+    // Select executor based on configuration (guaranteed to be valid after config loading)
+    switch (this.config.hub.executor) {
+      case 'v1':
+        logger.info('Using Plan Executor V1');
+        return this.planExecutor;
+      case 'v2':
+        logger.info('Using Plan Executor V2');
+        return this.planExecutorV2;
+      default:
+        // This should never happen due to validation in loadConfig()
+        throw new Error(`Unexpected executor type: ${this.config.hub.executor}`);
+    }
   }
 
   private loadConfig(): Config {
@@ -204,6 +232,18 @@ class LocalMCPHub {
       const configData = fs.readFileSync(configPath, 'utf-8');
       const config = JSON.parse(configData) as Config;
 
+      // Set default executor if not specified
+      if (!config.hub.executor) {
+        config.hub.executor = 'v1';
+        logger.warn('No executor specified in config, defaulting to v1');
+      }
+
+      // Validate executor value
+      if (config.hub.executor !== 'v1' && config.hub.executor !== 'v2') {
+        logger.error(`Invalid executor "${config.hub.executor}" in config. Must be 'v1' or 'v2'. Defaulting to 'v1'.`);
+        config.hub.executor = 'v1';
+      }
+
       // Update logger level based on config and environment variable
       const logLevel = config.hub.log_level || process.env.LOG_LEVEL || 'info';
       logger.level = logLevel;
@@ -211,6 +251,7 @@ class LocalMCPHub {
       logger.info('Configuration loaded', {
         ollamaHost: config.ollama.host,
         port: config.hub.port,
+        executor: config.hub.executor,
         logLevel: logLevel,
       });
       return config;
@@ -471,25 +512,19 @@ class LocalMCPHub {
         const hasToolResults = messages.some(msg => msg.role === 'tool');
 
         if (hasToolResults) {
-          // Generate final response using tool results
+          // Delegate to selected executor
           const mcpTools = this.mcpManager.getOpenAITools();
           
-          const projectFileStructure = await this.getProjectFileStructure();
-          
-          const planDecisionParams = this.getPromptParameters(
-            this.prompts.responseGeneration?.planDecision,
-            temperature,
-            max_tokens
-          );
-          
-          const response = await this.requestProcessor.generateResponseWithToolResults(
+          await this.selectedExecutor.handleRequest(
             messages,
-            planDecisionParams.temperature,
-            planDecisionParams.maxTokens,
+            res,
+            temperature,
+            max_tokens,
             mcpTools,
-            projectFileStructure
+            (forceRefresh?: boolean) => this.getProjectFileStructure(forceRefresh),
+            this.config.hub.default_temperature,
+            this.config.hub.default_max_tokens
           );
-          this.requestProcessor.sendStreamingResponse(res, response, this.config.ollama.model);
           return;
         }
 
@@ -570,67 +605,28 @@ class LocalMCPHub {
                 ];
 
                 const finalResponseStartTime = Date.now();
-                logger.info('Starting response generation - checking for plans');
+                logger.info('Starting response generation - delegating to selected executor');
 
-                // Generate response and check if it's a plan
-                logger.debug('PLAN DECISION PROMPT', {
+                // Delegate to selected executor
+                logger.debug('DELEGATING TO EXECUTOR', {
                   messagesWithToolCount: messagesWithTool.length,
                   fullMessages: messagesWithTool,
                   temperature: temperature,
                   maxTokens: max_tokens
                 });
 
-                const planDecisionParams = this.getPromptParameters(
-                  this.prompts.responseGeneration?.planDecision,
-                  temperature,
-                  max_tokens
-                );
-                
-                const response = await this.requestProcessor.generateResponseWithToolResults(
+                await this.selectedExecutor.handleRequest(
                   messagesWithTool,
-                  planDecisionParams.temperature,
-                  planDecisionParams.maxTokens,
+                  res,
+                  temperature,
+                  max_tokens,
                   mcpTools,
-                  projectFileStructure
+                  (forceRefresh?: boolean) => this.getProjectFileStructure(forceRefresh),
+                  this.config.hub.default_temperature,
+                  this.config.hub.default_max_tokens
                 );
 
-                logger.debug('PLAN DECISION RESPONSE', {
-                  responseLength: response.length,
-                  responsePreview: response.substring(0, 300) + '...',
-                  fullResponse: response
-                });
-
-                // Check if response contains a plan
-                if (this.requestProcessor.isPlanResponse(response)) {
-                  const plan = this.requestProcessor.extractPlanFromResponse(response);
-                  if (plan && plan.next_step) {
-                    logger.info('Plan detected, starting multi-step execution', {
-                      objective: plan.main_objective,
-                      stepsCount: plan.later_steps?.length || 0
-                    });
-
-                    // Execute the plan with the messages that include the tool result
-                    await this.planExecutor.executePlan(
-                      messagesWithTool, 
-                      plan, 
-                      temperature, 
-                      max_tokens, 
-                      res,
-                      (forceRefresh?: boolean) => this.getProjectFileStructure(forceRefresh),
-                      this.config.hub.default_temperature,
-                      this.config.hub.default_max_tokens
-                    );
-                    logTiming('Plan execution', finalResponseStartTime);
-                    logTiming('Total chat completion request', startTime);
-                    return;
-                  }
-                }
-
-                // No plan detected, stream normal response
-                logger.info('No plan detected, streaming final response');
-                this.requestProcessor.sendStreamingResponse(res, response, this.config.ollama.model);
-                logTiming('Final response generation', finalResponseStartTime);
-
+                logTiming('Executor execution', finalResponseStartTime);
                 logTiming('Total chat completion request', startTime);
                 return;
               } catch (toolError) {
@@ -1005,7 +1001,6 @@ class LocalMCPHub {
         );
         
         this.requestProcessor.updateConfig(
-          this.prompts.responseGeneration || {},
           this.prompts.systemMessages || {}
         );
 
@@ -1067,613 +1062,6 @@ class LocalMCPHub {
       await this.mcpManager.initializeMCPSchemas();
     });
   }
-
-  // REMOVED: executePlan method has been moved to PlanExecutorV1
-  private async OLD_executePlan_REMOVED(
-    originalMessages: any[],
-    initialPlan: PlanResponse,
-    temperature: number,
-    maxTokens: number,
-    res: any
-  ): Promise<void> {
-    logger.debug('PLAN EXECUTION START', {
-      initialPlan: initialPlan,
-      originalMessagesCount: originalMessages.length,
-      fullOriginalMessages: originalMessages,
-      temperature: temperature,
-      maxTokens: maxTokens
-    });
-
-    let currentPlan = initialPlan;
-    
-    // Create initial completed step from assistant data evaluation
-    const initialCompletedSteps: CompletedStepRequest[] = [];
-    if (currentPlan.conclusion_from_junior_assistant_data || currentPlan.junior_assistant_data_was_helpful !== undefined) {
-      // Extract tool call information from the initial tool result
-      const initialToolCall = originalMessages.find((msg: any) => msg.role === 'assistant' && typeof msg.content === 'object' && msg.content.tool);
-      const toolCalls = [];
-      if (initialToolCall) {
-        const assistantResult = initialToolCall.content as any;
-        toolCalls.push({
-          prompt: assistantResult.prompt,
-          tool: assistantResult.tool,
-          args: assistantResult.args
-        });
-      }
-
-      initialCompletedSteps.push({
-        objective: "Assistant gathers initial information",
-        success: currentPlan.junior_assistant_data_was_helpful || false,
-        conclusion: currentPlan.conclusion_from_junior_assistant_data || "No conclusion provided from assistant data",
-        toolCalls: toolCalls
-      });
-    }
-    
-    let executionState: PlanExecutionState = {
-      objective: currentPlan.main_objective,
-      completedSteps: initialCompletedSteps,
-      currentStep: currentPlan.next_step,
-      currentStepNotes: undefined,
-      currentStepAssistant: undefined,
-      currentStepToolCalls: [],
-      laterSteps: currentPlan.later_steps || [],
-      stepResults: []
-    };
-
-    logger.debug('PLAN EXECUTION STATE INIT', {
-      executionState: executionState
-    });
-
-    // Stream initial plan to user and get stream context
-    const streamContext = this.requestProcessor.streamPlanResponse(res, currentPlan, this.config.ollama.model);
-
-    let totalIterationCount = 0;
-    let stepIterationCount = 0;
-    const stepLimit = 10; // Maximum number of completed steps
-    const totalIterationLimit = 50; // Maximum number of total iterations across all steps
-    const stepIterationLimit = 10; // Maximum number of iterations per step
-
-    logger.debug('PLAN EXECUTION LOOP START', {
-      stepLimit: stepLimit,
-      totalIterationLimit: totalIterationLimit,
-      stepIterationLimit: stepIterationLimit,
-      hasNextStep: !!currentPlan.next_step
-    });
-
-    while (executionState.currentStep && 
-           executionState.completedSteps.length <= stepLimit && 
-           totalIterationCount < totalIterationLimit && 
-           stepIterationCount < stepIterationLimit) {
-      totalIterationCount++;
-      stepIterationCount++;
-      logger.info(`Executing plan iteration ${totalIterationCount} (step iteration ${stepIterationCount}): ${executionState.currentStep.objective}`);
-      logger.debug('PLAN STEP EXECUTION START', {
-        totalIterationNumber: totalIterationCount,
-        stepIterationNumber: stepIterationCount,
-        stepDetails: executionState.currentStep,
-        currentExecutionState: executionState
-      });
-
-      try {
-        // Generate arguments for the current step's tool
-        const availableMcpTools = this.mcpManager.getOpenAITools();
-        const currentTool = availableMcpTools.find(tool => tool.function.name === executionState.currentStep!.tool);
-        
-        logger.debug('PLAN STEP TOOL LOOKUP', {
-          requestedTool: executionState.currentStep!.tool,
-          toolFound: !!currentTool,
-          availableToolNames: availableMcpTools.map((t: any) => t.function.name),
-          totalAvailableTools: availableMcpTools.length
-        });
-
-        let toolResult: string;
-
-        if (!currentTool) {
-          logger.error(`Tool not found: ${executionState.currentStep!.tool}`);
-          logger.debug('PLAN STEP TOOL NOT FOUND', {
-            requestedTool: executionState.currentStep!.tool,
-            availableTools: availableMcpTools.map(t => ({ name: t.function.name, description: t.function.description }))
-          });
-          
-          // Treat tool not found as a step result and continue with plan iteration
-          toolResult = `Error: Tool "${executionState.currentStep!.tool}" does not exist. Available tools: ${availableMcpTools.map(t => t.function.name).join(', ')}`;
-          
-          // Store tool not found error as assistant data
-          executionState.currentStepAssistant = {
-            tool: executionState.currentStep!.tool,
-            prompt: executionState.currentStep!.prompt,
-            args: JSON.stringify({}),
-            results: toolResult
-          };
-
-          // Add tool call to current step's tool call history
-          executionState.currentStepToolCalls.push({
-            prompt: executionState.currentStep!.prompt,
-            tool: executionState.currentStep!.tool,
-            args: JSON.stringify({})
-          });
-          
-          logger.debug('PLAN STEP ERROR TREATED AS RESULT', {
-            errorResult: toolResult
-          });
-        } else {
-          try {
-            // Use the step's prompt to generate arguments
-            const stepPrompt = [
-              ...originalMessages,
-              { role: 'user', content: executionState.currentStep!.prompt }
-            ];
-
-            logger.debug('PLAN STEP ARGUMENT GENERATION', {
-              stepPrompt: stepPrompt,
-              userRequest: executionState.currentStep!.prompt,
-              toolSchema: currentTool
-            });
-
-            // Generate arguments for the selected tool
-            const userRequest = executionState.currentStep!.prompt;
-            const isSimpleArg = this.toolSelector.isSimpleArgumentGeneration(executionState.currentStep!.tool);
-            
-            // Get project file structure for argument generation (same as used for initial tool selection)
-            const projectFileStructure = await this.getProjectFileStructure();
-            
-            logger.debug('PLAN STEP ARG STRATEGY', {
-              tool: executionState.currentStep!.tool,
-              isSimpleArg: isSimpleArg,
-              userRequest: userRequest,
-              hasProjectFileStructure: !!projectFileStructure
-            });
-
-            let toolArgs;
-            if (isSimpleArg) {
-              toolArgs = await this.toolSelector.generateArgsWithFastModel(userRequest, currentTool, projectFileStructure);
-            } else {
-              toolArgs = await this.toolSelector.generateArgsWithFullModel(userRequest, currentTool, projectFileStructure);
-            }
-
-            logger.debug('PLAN STEP GENERATED ARGS', {
-              tool: executionState.currentStep!.tool,
-              generatedArgs: toolArgs,
-              argsType: typeof toolArgs
-            });
-
-            // Unwrap arguments if they're nested in "args" object
-            const actualArgs = toolArgs && typeof toolArgs === 'object' && 'args' in toolArgs ? toolArgs.args : toolArgs;
-
-            // Execute the tool
-            logger.debug('PLAN STEP TOOL EXECUTION START', {
-              tool: executionState.currentStep!.tool,
-              args: actualArgs,
-              originalArgs: toolArgs
-            });
-
-            toolResult = await this.mcpManager.callMCPTool(
-              executionState.currentStep!.tool,
-              actualArgs
-            );
-
-            // Store assistant tool result for current step context
-            executionState.currentStepAssistant = {
-              tool: executionState.currentStep!.tool,
-              prompt: executionState.currentStep!.prompt,
-              args: JSON.stringify(actualArgs),
-              results: toolResult
-            };
-
-            // Add tool call to current step's tool call history
-            executionState.currentStepToolCalls.push({
-              prompt: executionState.currentStep!.prompt,
-              tool: executionState.currentStep!.tool,
-              args: JSON.stringify(actualArgs)
-            });
-
-            logger.debug('PLAN STEP TOOL EXECUTION RESULT', {
-              tool: executionState.currentStep!.tool,
-              resultLength: toolResult.length,
-              resultPreview: toolResult.substring(0, 200) + '...',
-              fullResult: toolResult
-            });
-          } catch (toolError) {
-            logger.error(`Error executing tool ${executionState.currentStep!.tool}:`, toolError);
-            toolResult = `Error executing tool "${executionState.currentStep!.tool}": ${toolError instanceof Error ? toolError.message : 'Unknown error'}`;
-            
-            // Store error result as assistant data (use empty args since we couldn't generate them)
-            executionState.currentStepAssistant = {
-              tool: executionState.currentStep!.tool,
-              prompt: executionState.currentStep!.prompt,
-              args: JSON.stringify({}),
-              results: toolResult
-            };
-
-            // Add tool call to current step's tool call history
-            executionState.currentStepToolCalls.push({
-              prompt: executionState.currentStep!.prompt,
-              tool: executionState.currentStep!.tool,
-              args: JSON.stringify({})
-            });
-            
-            logger.debug('PLAN STEP EXECUTION ERROR TREATED AS RESULT', {
-              errorResult: toolResult,
-              error: toolError
-            });
-          }
-        }
-
-        logger.debug('PLAN EXECUTION STATE PRE-ITERATION', {
-          completedStepsCount: executionState.completedSteps.length,
-          completedSteps: executionState.completedSteps,
-          currentStep: executionState.currentStep,
-          updatedExecutionState: executionState
-        });
-
-        // Extract user prompt from original messages
-        const userMessage = originalMessages.find(msg => msg.role === 'user');
-        const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
-
-        // Get tools with usage hints for the prompt
-        const iterationMcpTools = this.mcpManager.getOpenAITools();
-        const toolNamesAndHints = this.toolSelector.formatToolsWithUsageHints(iterationMcpTools);
-
-        // Get refreshed project file structure for plan iteration (files may have changed)
-        const projectFileStructure = await this.getProjectFileStructure(true); // Force refresh
-
-        // Create prompt for plan iteration using the new template format
-        const completedStepsText = this.requestProcessor.formatCompletedStepsWithTemplates(executionState.completedSteps);
-        
-        // Format next steps
-        const nextStepsText = executionState.laterSteps.length > 0
-          ? executionState.laterSteps.map((step) => `- ${step}`).join('\n')
-          : 'None';
-        
-        // Build structured CurrentStepRequest object according to specification
-        const currentStepRequest: CurrentStepRequest = {
-          objective: executionState.currentStep?.objective || 'No current step',
-          completed: false, // Always false since we're still working on it
-          notes: executionState.currentStepNotes || '',
-          assistant: executionState.currentStepAssistant || {
-            tool: 'none',
-            prompt: 'No tool executed yet',
-            args: '{}',
-            results: 'No results yet'
-          }
-        };
-        
-        // Format current step using template
-        const notesLine = currentStepRequest.notes && currentStepRequest.notes.trim() || "*No notes yet*";
-        
-        // Format previous tool list for current step using previousTool template
-        // Exclude the most recent tool call since it's shown separately in "Recent Junior Assistant Task"
-        const previousToolTemplate = this.prompts.responseGeneration?.previousTool?.template || '';
-        const previousToolCalls = executionState.currentStepToolCalls.slice(0, -1); // Exclude last (most recent) tool call
-        const previousToolList = previousToolCalls.map(toolCall => {
-          const toolVariables: Record<string, string> = {
-            prompt: toolCall.prompt,
-            tool: toolCall.tool,
-            args: toolCall.args
-          };
-          return this.requestProcessor.replaceTemplateVariables(previousToolTemplate, toolVariables);
-        }).join('\n');
-        
-        const currentStepTemplate = this.prompts.responseGeneration?.currentStep?.template || '';
-        const currentStepNumber = executionState.completedSteps.length + 1;
-        const currentStepVariables: Record<string, string> = {
-          stepNumber: currentStepNumber.toString(),
-          objective: currentStepRequest.objective,
-          notes: notesLine,
-          previousToolList: previousToolList,
-          tool: currentStepRequest.assistant.tool,
-          prompt: currentStepRequest.assistant.prompt,
-          args: currentStepRequest.assistant.args,
-          results: this.requestProcessor.formatToolResultsAsBlockQuote(currentStepRequest.assistant.results)
-        };
-        
-        const currentStepText = this.requestProcessor.replaceTemplateVariables(currentStepTemplate, currentStepVariables);
-        
-        // Use finalIteration template if this is the last iteration
-        let planIterationPrompt: string;
-        let currentPromptConfig: { temperature?: number; maxTokens?: number } | undefined;
-        const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
-        
-        if (totalIterationCount >= totalIterationLimit || stepIterationCount >= stepIterationLimit) {
-          // Use finalIteration for hard iteration limits
-          currentPromptConfig = this.prompts.responseGeneration?.finalIteration;
-          const templateVariables: Record<string, string> = {
-            systemPrompt: systemPrompt,
-            projectFileStructure: projectFileStructure,
-            userPrompt: userPrompt,
-            objective: executionState.objective,
-            completedSteps: completedStepsText
-          };
-          
-          planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
-            this.prompts.responseGeneration!.finalIteration!.template!,
-            templateVariables
-          );
-        } else if (executionState.completedSteps.length >= stepLimit) {
-          // Use stepLimitIteration when step limit is reached
-          const templateVariables: Record<string, string> = {
-            systemPrompt: systemPrompt,
-            projectFileStructure: projectFileStructure,
-            userPrompt: userPrompt,
-            objective: executionState.objective,
-            completedSteps: completedStepsText,
-            currentStep: currentStepText,
-            nextSteps: nextStepsText,
-            toolNamesAndHints: toolNamesAndHints
-          };
-          
-          const stepLimitTemplate = this.prompts.responseGeneration?.stepLimitIteration?.template;
-          if (stepLimitTemplate) {
-            currentPromptConfig = this.prompts.responseGeneration?.stepLimitIteration;
-            planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
-              stepLimitTemplate,
-              templateVariables
-            );
-          } else {
-            // Fallback to finalIteration if stepLimitIteration is not defined
-            currentPromptConfig = this.prompts.responseGeneration?.finalIteration;
-            planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
-              this.prompts.responseGeneration!.finalIteration!.template!,
-              templateVariables
-            );
-          }
-        } else {
-          // Prepare template variables for regular iteration
-          currentPromptConfig = this.prompts.responseGeneration?.planIteration;
-          const templateVariables: Record<string, string> = {
-            systemPrompt: systemPrompt,
-            projectFileStructure: projectFileStructure,
-            userPrompt: userPrompt,
-            objective: executionState.objective,
-            completedSteps: completedStepsText,
-            currentStep: currentStepText,
-            nextSteps: nextStepsText,
-            toolNamesAndHints: toolNamesAndHints
-          };
-          
-          planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
-            this.prompts.responseGeneration!.planIteration!.template!,
-            templateVariables
-          );
-        }
-
-        logger.debug('PLAN ITERATION PROMPT', {
-          template: this.prompts.responseGeneration!.planIteration!.template,
-          objective: executionState.objective,
-          completedStepsText: completedStepsText,
-          toolResultLength: toolResult.length,
-          finalPrompt: planIterationPrompt,
-          promptLength: planIterationPrompt.length
-        });
-
-        // Get temperature and maxTokens using generic method
-        const promptParams = this.getPromptParameters(currentPromptConfig, temperature, maxTokens);
-        
-        // Generate next plan iteration
-        logger.debug('PLAN ITERATION OLLAMA CALL START', {
-          prompt: planIterationPrompt,
-          temperature: promptParams.temperature,
-          maxTokens: promptParams.maxTokens,
-          configUsed: currentPromptConfig ? 'prompt-specific' : 'defaults'
-        });
-
-        const response = await this.ollamaClient.sendToOllama(planIterationPrompt, promptParams.temperature, promptParams.maxTokens);
-
-        logger.debug('PLAN ITERATION OLLAMA RESPONSE', {
-          responseLength: response.length,
-          responsePreview: response.substring(0, 300) + '...',
-          fullResponse: response
-        });
-
-        // If this was the final iteration (not stepLimitIteration), treat any response as final conclusion
-        if (totalIterationCount >= totalIterationLimit || stepIterationCount >= stepIterationLimit) {
-          logger.debug('PLAN EXECUTION FINAL ITERATION CONCLUSION', {
-            response: response,
-            reason: totalIterationCount >= totalIterationLimit ? 'Total iteration limit reached' : 'Step iteration limit reached'
-          });
-          this.requestProcessor.streamFinalConclusion(res, response, streamContext);
-          break;
-        }
-        
-        // Parse the response using the new 3-branching system
-        const iterationResponse = this.requestProcessor.parseIterationResponse(response);
-        
-        if (iterationResponse === null) {
-          // Malformed response, treat as conclusion
-          logger.debug('PLAN ITERATION MALFORMED RESPONSE', {
-            response: response,
-            reason: 'parseIterationResponse returned null'
-          });
-          this.requestProcessor.streamFinalConclusion(res, 'Plan execution ended due to malformed response.', streamContext);
-          break;
-        }
-        
-        if (typeof iterationResponse === 'string') {
-          // Option 3: Final conclusion reached
-          logger.debug('PLAN EXECUTION FINAL CONCLUSION', {
-            response: iterationResponse,
-            reason: 'Model provided final conclusion'
-          });
-          this.requestProcessor.streamFinalConclusion(res, iterationResponse, streamContext);
-          break;
-        }
-        
-        if ('completed' in iterationResponse.current_step) {
-          // Option 2: Step completed, need to check for next step
-          const stepCompleteResponse = iterationResponse as CurrentStepCompleteResponse;
-          logger.debug('PLAN STEP COMPLETED', {
-            stepComplete: stepCompleteResponse,
-            currentStepObjective: executionState.currentStep?.objective
-          });
-          
-          if (!stepCompleteResponse.next_step) {
-            // No next step provided - final conclusion
-            logger.debug('PLAN EXECUTION FINAL CONCLUSION', {
-              response: stepCompleteResponse.current_step.notes_to_future_self,
-              reason: 'Step completed but no next step provided'
-            });
-            this.requestProcessor.streamFinalConclusion(res, stepCompleteResponse.current_step.notes_to_future_self, streamContext);
-            break;
-          }
-          
-          // Update execution state: move current step to completed
-          if (executionState.currentStep) {
-            const completedStep: CompletedStepRequest = {
-              objective: executionState.currentStep.objective,
-              success: stepCompleteResponse.current_step.success,
-              conclusion: stepCompleteResponse.current_step.notes_to_future_self,
-              toolCalls: executionState.currentStepToolCalls
-            };
-            executionState.completedSteps.push(completedStep);
-          }
-          
-          // Check if we've reached the step limit
-          if (executionState.completedSteps.length >= stepLimit) {
-            // Step limit reached - ignore next_step and send final iteration
-            logger.debug('PLAN STEP LIMIT REACHED', {
-              completedStepsCount: executionState.completedSteps.length,
-              stepLimit: stepLimit,
-              ignoringNextStep: stepCompleteResponse.next_step
-            });
-            
-            // Stream step completion without next step header
-            this.requestProcessor.streamStepCompletion(
-              res,
-              stepCompleteResponse.current_step.notes_to_future_self,
-              undefined, // No next step header
-              streamContext
-            );
-            
-            // Send final iteration prompt to get conclusion
-            const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
-            const projectFileStructure = await this.getProjectFileStructure(true);
-            const userMessage = originalMessages.find(msg => msg.role === 'user');
-            const userPrompt = userMessage ? userMessage.content : 'No user prompt available';
-            const completedStepsText = this.requestProcessor.formatCompletedStepsWithTemplates(executionState.completedSteps);
-            
-            const templateVariables: Record<string, string> = {
-              systemPrompt: systemPrompt,
-              projectFileStructure: projectFileStructure,
-              userPrompt: userPrompt,
-              objective: executionState.objective,
-              completedSteps: completedStepsText
-            };
-            
-            const finalIterationPrompt = this.requestProcessor.replaceTemplateVariables(
-              this.prompts.responseGeneration!.finalIteration!.template!,
-              templateVariables
-            );
-            
-            const finalPromptParams = this.getPromptParameters(
-              this.prompts.responseGeneration?.finalIteration,
-              temperature,
-              maxTokens
-            );
-            
-            logger.debug('PLAN FINAL ITERATION DUE TO STEP LIMIT', {
-              completedStepsCount: executionState.completedSteps.length,
-              stepLimit: stepLimit,
-              promptLength: finalIterationPrompt.length
-            });
-            
-            const finalResponse = await this.ollamaClient.sendToOllama(
-              finalIterationPrompt, 
-              finalPromptParams.temperature, 
-              finalPromptParams.maxTokens
-            );
-            
-            this.requestProcessor.streamFinalConclusion(res, finalResponse, streamContext);
-            break;
-          }
-          
-          // Set the next step as current and reset step tracking
-          executionState.currentStep = {
-            objective: stepCompleteResponse.next_step.objective,
-            tool: stepCompleteResponse.next_step.tool,
-            prompt: stepCompleteResponse.next_step.prompt
-          };
-          executionState.currentStepNotes = undefined; // Reset notes for new step
-          executionState.currentStepAssistant = undefined; // Reset assistant data for new step
-          executionState.currentStepToolCalls = []; // Reset tool calls for new step
-          stepIterationCount = 0; // Reset step iteration counter for new step
-          
-          // Stream step completion
-          this.requestProcessor.streamStepCompletion(
-            res,
-            stepCompleteResponse.current_step.notes_to_future_self,
-            executionState.currentStep,
-            streamContext
-          );
-          
-          logger.debug('PLAN ITERATION CONTINUES TO NEXT STEP', {
-            completedStep: stepCompleteResponse,
-            nextStep: stepCompleteResponse.next_step,
-            updatedExecutionState: executionState
-          });
-          
-        } else {
-          // Option 1: Continue working on current step
-          const stepIterationResponse = iterationResponse as CurrentStepIterationResponse;
-          logger.debug('PLAN STEP ITERATION CONTINUES', {
-            iteration: stepIterationResponse,
-            currentStepObjective: executionState.currentStep?.objective
-          });
-          
-          // Update current step with new tool and prompt, store notes
-          if (executionState.currentStep) {
-            executionState.currentStep.tool = stepIterationResponse.current_step.tool;
-            executionState.currentStep.prompt = stepIterationResponse.current_step.prompt;
-          }
-          // Accumulate notes instead of replacing them
-          if (executionState.currentStepNotes) {
-            executionState.currentStepNotes += '\n\n' + stepIterationResponse.current_step.notes_to_future_self;
-          } else {
-            executionState.currentStepNotes = stepIterationResponse.current_step.notes_to_future_self;
-          }
-          
-          // Stream progress update
-          this.requestProcessor.streamStepCompletion(
-            res,
-            stepIterationResponse.current_step.notes_to_future_self,
-            undefined, // No next step header since we're continuing current step
-            streamContext
-          );
-          
-          logger.debug('PLAN ITERATION CONTINUES ON CURRENT STEP', {
-            iteration: stepIterationResponse,
-            updatedExecutionState: executionState
-          });
-        }
-
-      } catch (error) {
-        logger.error(`Error executing plan step: ${error}`);
-        logger.debug('PLAN STEP ERROR DETAILS', {
-          error: error,
-          totalIterationNumber: totalIterationCount,
-          stepIterationNumber: stepIterationCount,
-          currentStep: executionState.currentStep,
-          errorMessage: error instanceof Error ? error.message : 'Unknown error',
-          errorStack: error instanceof Error ? error.stack : undefined
-        });
-        const errorMessage = `Error in step "${currentPlan.next_step!.objective}": ${error instanceof Error ? error.message : 'Unknown error'}`;
-        this.requestProcessor.streamFinalConclusion(res, errorMessage, streamContext);
-        break;
-      }
-    }
-
-    logger.debug('PLAN EXECUTION LOOP END', {
-      totalIterationCount: totalIterationCount,
-      totalIterationLimit: totalIterationLimit,
-      stepIterationCount: stepIterationCount,
-      stepIterationLimit: stepIterationLimit,
-      completedStepsCount: executionState.completedSteps.length,
-      stepLimit: stepLimit,
-      hasCurrentStep: !!executionState.currentStep,
-      finalExecutionState: executionState
-    });
-
-  }
-
 }
 
 // Start the hub
