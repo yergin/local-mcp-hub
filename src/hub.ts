@@ -49,6 +49,7 @@ interface PromptsConfig {
     planDecision?: { template?: string };
     planIteration?: { template?: string };
     finalIteration?: { template?: string };
+    stepLimitIteration?: { template?: string };
     currentStep?: { template?: string };
     planDecisionAssistant?: { template?: string };
     previousTool?: { template?: string };
@@ -1064,7 +1065,7 @@ class LocalMCPHub {
     });
 
     while (executionState.currentStep && 
-           executionState.completedSteps.length < stepLimit && 
+           executionState.completedSteps.length <= stepLimit && 
            totalIterationCount < totalIterationLimit && 
            stepIterationCount < stepIterationLimit) {
       totalIterationCount++;
@@ -1265,8 +1266,10 @@ class LocalMCPHub {
         const notesLine = currentStepRequest.notes && currentStepRequest.notes.trim() || "*No notes yet*";
         
         // Format previous tool list for current step using previousTool template
+        // Exclude the most recent tool call since it's shown separately in "Recent Junior Assistant Task"
         const previousToolTemplate = this.prompts.responseGeneration?.previousTool?.template || '';
-        const previousToolList = executionState.currentStepToolCalls.map(toolCall => {
+        const previousToolCalls = executionState.currentStepToolCalls.slice(0, -1); // Exclude last (most recent) tool call
+        const previousToolList = previousToolCalls.map(toolCall => {
           const toolVariables: Record<string, string> = {
             prompt: toolCall.prompt,
             tool: toolCall.tool,
@@ -1294,8 +1297,8 @@ class LocalMCPHub {
         let planIterationPrompt: string;
         const systemPrompt = this.prompts.systemMessages?.customSystemPrompt?.template || '';
         
-        if (totalIterationCount >= totalIterationLimit || executionState.completedSteps.length >= stepLimit || stepIterationCount >= stepIterationLimit) {
-          // Prepare template variables for final iteration
+        if (totalIterationCount >= totalIterationLimit || stepIterationCount >= stepIterationLimit) {
+          // Use finalIteration for hard iteration limits
           const templateVariables: Record<string, string> = {
             systemPrompt: systemPrompt,
             projectFileStructure: projectFileStructure,
@@ -1308,6 +1311,32 @@ class LocalMCPHub {
             this.prompts.responseGeneration!.finalIteration!.template!,
             templateVariables
           );
+        } else if (executionState.completedSteps.length >= stepLimit) {
+          // Use stepLimitIteration when step limit is reached
+          const templateVariables: Record<string, string> = {
+            systemPrompt: systemPrompt,
+            projectFileStructure: projectFileStructure,
+            userPrompt: userPrompt,
+            objective: executionState.objective,
+            completedSteps: completedStepsText,
+            currentStep: currentStepText,
+            nextSteps: nextStepsText,
+            toolNamesAndHints: toolNamesAndHints
+          };
+          
+          const stepLimitTemplate = this.prompts.responseGeneration?.stepLimitIteration?.template;
+          if (stepLimitTemplate) {
+            planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
+              stepLimitTemplate,
+              templateVariables
+            );
+          } else {
+            // Fallback to finalIteration if stepLimitIteration is not defined
+            planIterationPrompt = this.requestProcessor.replaceTemplateVariables(
+              this.prompts.responseGeneration!.finalIteration!.template!,
+              templateVariables
+            );
+          }
         } else {
           // Prepare template variables for regular iteration
           const templateVariables: Record<string, string> = {
@@ -1351,12 +1380,11 @@ class LocalMCPHub {
           fullResponse: response
         });
 
-        // If this was the final iteration, treat any response as final conclusion
-        if (totalIterationCount >= totalIterationLimit || executionState.completedSteps.length >= stepLimit || stepIterationCount >= stepIterationLimit) {
+        // If this was the final iteration (not stepLimitIteration), treat any response as final conclusion
+        if (totalIterationCount >= totalIterationLimit || stepIterationCount >= stepIterationLimit) {
           logger.debug('PLAN EXECUTION FINAL ITERATION CONCLUSION', {
             response: response,
-            reason: totalIterationCount >= totalIterationLimit ? 'Total iteration limit reached' : 
-                    stepIterationCount >= stepIterationLimit ? 'Step iteration limit reached' : 'Step limit reached'
+            reason: totalIterationCount >= totalIterationLimit ? 'Total iteration limit reached' : 'Step iteration limit reached'
           });
           this.requestProcessor.streamFinalConclusion(res, response, streamContext);
           break;

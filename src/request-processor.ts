@@ -102,6 +102,7 @@ export interface ResponseGenerationConfig {
   planDecision?: { template?: string }; // renamed from toolResultsNonStreaming
   planIteration?: { template?: string };
   finalIteration?: { template?: string };
+  stepLimitIteration?: { template?: string };
   planDecisionAssistant?: { template?: string };
   previousTool?: { template?: string };
   previousStep?: { template?: string };
@@ -585,11 +586,11 @@ Success: {success}
         return completeResponse;
       }
       
-      // If neither pattern matches, treat as malformed
-      this.logger.debug('ITERATION RESPONSE: Malformed JSON structure', {
+      // If neither pattern matches, treat as final conclusion
+      this.logger.debug('ITERATION RESPONSE: JSON parsed but no expected structure found, treating as final conclusion', {
         parsedStructure: parsed
       });
-      return null;
+      return response.trim();
       
     } catch (parseError) {
       this.logger.debug('ITERATION RESPONSE (DIRECT JSON FAILED)', {
@@ -652,11 +653,11 @@ Success: {success}
             return completeResponse;
           }
           
-          // If neither pattern matches, treat as malformed
-          this.logger.debug('ITERATION RESPONSE: Malformed JSON structure (from markdown)', {
+          // If neither pattern matches, treat as final conclusion
+          this.logger.debug('ITERATION RESPONSE: JSON from markdown parsed but no expected structure found, treating as final conclusion', {
             parsedStructure: parsed
           });
-          return null;
+          return response.trim();
           
         } catch (extractParseError) {
           this.logger.debug('ITERATION RESPONSE (EXTRACTED JSON FAILED)', {
