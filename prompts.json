@@ -171,6 +171,9 @@
     "finalIteration": {
       "template": "{systemPrompt}\n\n# Current Workspace Files (non-exhaustive)\n{projectFileStructure}\n\n# User Request\n{userPrompt}\n\n\n\n# Your Executed Plan\n\n## Main Objective\n{objective}\n\n## Previous Steps\n{completedSteps}\n\n## Current Step\n{currentStep}\n\n# Your Response\nBased on all the work completed above, please provide a comprehensive, final conclusion that addresses the user request. Summarize key findings, and provide a complete answer to the original request.\n\nResponse:"
     },
+    "errorConclusion": {
+      "template": "{systemPrompt}\n\n# Current Workspace Files (non-exhaustive)\n{projectFileStructure}\n\n# User Request\n{userPrompt}\n\n\n\n# Error Information\n\nThe conversation has concluded due to an error: {errorString}\n\n## Main Objective\n{objective}\n\n## Previous Steps\n{completedSteps}\n\n## Current Step\n{currentStep}\n\n# Your Response\nBased on all the work completed above, please provide a comprehensive, final conclusion that addresses the user request. Summarize key findings, and provide a complete answer to the original request.\n\nResponse:"
+    },
     "planDecisionAssistant": {
       "template": "- Prompt to junior assistant: \"{prompt}\"\n- Tool you chose: {tool}\n- Tool arguments junior assistant chose: {args}\n- Tool Results:\n\n{results}"
     },

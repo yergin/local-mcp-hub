@@ -13,6 +13,8 @@ import {
   ArgumentGenerationConfig,
 } from './tool-selector';
 import { RequestProcessor, ResponseGenerationConfig, SystemMessageConfig, PlanResponse, PlanExecutionState, PlanStep, CompletedStepRequest, CurrentStepIterationResponse, CurrentStepCompleteResponse, CurrentStepRequest } from './request-processor';
+import { PlanExecutorV1, PlanExecutorConfig } from './plan-executor-v1';
+import { PromptManager } from './prompt-manager';
 
 // Prompts configuration interfaces
 interface PromptConfig {
@@ -133,10 +135,12 @@ class LocalMCPHub {
   private app: express.Application;
   private config: Config;
   private prompts: PromptsConfig;
+  private promptManager: PromptManager;
   private ollamaClient: OllamaClient;
   private mcpManager: MCPManager;
   private toolSelector: ToolSelector;
   private requestProcessor: RequestProcessor;
+  private planExecutor: PlanExecutorV1;
   private cachedProjectFileStructure: string | null = null;
   private projectFileStructureTimestamp: number = 0;
 
@@ -145,6 +149,10 @@ class LocalMCPHub {
     this.config = this.loadConfig();
     this.prompts = this.loadPrompts();
     this.ensureTmpDirectory();
+
+    // Initialize prompt manager
+    const promptsPath = path.join(__dirname, '..', 'prompts.json');
+    this.promptManager = new PromptManager(promptsPath, logger);
 
     // Initialize extracted classes
     this.ollamaClient = new OllamaClient(this.config.ollama, logger);
@@ -166,6 +174,23 @@ class LocalMCPHub {
       this.prompts.responseGeneration || {},
       this.prompts.systemMessages || {},
       this.toolSelector,
+      logger
+    );
+    
+    // Initialize plan executor
+    const planExecutorConfig: PlanExecutorConfig = {
+      stepLimit: 10,
+      totalIterationLimit: 50,
+      stepIterationLimit: 10
+    };
+    
+    this.planExecutor = new PlanExecutorV1(
+      this.ollamaClient,
+      this.toolSelector,
+      this.requestProcessor,
+      this.mcpManager,
+      this.promptManager,
+      planExecutorConfig,
       logger
     );
 
@@ -585,7 +610,16 @@ class LocalMCPHub {
                     });
 
                     // Execute the plan with the messages that include the tool result
-                    await this.executePlan(messagesWithTool, plan, temperature, max_tokens, res);
+                    await this.planExecutor.executePlan(
+                      messagesWithTool, 
+                      plan, 
+                      temperature, 
+                      max_tokens, 
+                      res,
+                      (forceRefresh?: boolean) => this.getProjectFileStructure(forceRefresh),
+                      this.config.hub.default_temperature,
+                      this.config.hub.default_max_tokens
+                    );
                     logTiming('Plan execution', finalResponseStartTime);
                     logTiming('Total chat completion request', startTime);
                     return;
@@ -957,6 +991,10 @@ class LocalMCPHub {
     // Prompts reload endpoint
     this.app.post('/v1/admin/reload-prompts', (req, res) => {
       try {
+        // Reload prompts in the centralized manager
+        this.promptManager.reloadPrompts();
+        
+        // Also reload the old prompts for backward compatibility
         this.prompts = this.loadPrompts();
         
         // Update all components with new prompts configuration
@@ -1030,7 +1068,8 @@ class LocalMCPHub {
     });
   }
 
-  private async executePlan(
+  // REMOVED: executePlan method has been moved to PlanExecutorV1
+  private async OLD_executePlan_REMOVED(
     originalMessages: any[],
     initialPlan: PlanResponse,
     temperature: number,

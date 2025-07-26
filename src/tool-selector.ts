@@ -235,7 +235,26 @@ export class ToolSelector {
           tool: toolSelection.tool,
           prompt: toolPrompt
         });
-        argsSelection = await this.generateArgsWithFastModel(toolPrompt, selectedTool, projectFileStructure);
+        
+        try {
+          argsSelection = await this.generateArgsWithFastModel(toolPrompt, selectedTool, projectFileStructure);
+        } catch (fastModelError) {
+          this.logger.warn('Fast model failed, falling back to full model', {
+            tool: toolSelection.tool,
+            error: fastModelError instanceof Error ? fastModelError.message : 'Unknown error'
+          });
+          
+          try {
+            argsSelection = await this.generateArgsWithFullModel(toolPrompt, selectedTool, projectFileStructure);
+          } catch (fullModelError) {
+            this.logger.error('Both fast and full model failed for argument generation', {
+              tool: toolSelection.tool,
+              fastModelError: fastModelError instanceof Error ? fastModelError.message : 'Unknown error',
+              fullModelError: fullModelError instanceof Error ? fullModelError.message : 'Unknown error'
+            });
+            throw new Error(`Tool argument generation failed for ${toolSelection.tool}. Both fast and full models produced invalid responses.`);
+          }
+        }
       } else {
         this.logger.info(
           `🧠 Using full model for complex argument generation: ${toolSelection.tool}`
@@ -305,7 +324,25 @@ export class ToolSelector {
 
     this.logger.debug(`DEBUG: Fast model Stage 2 response: "${cleanArgsResponse}"`);
 
-    const parsedArgs = JSON.parse(cleanArgsResponse);
+    let parsedArgs;
+    try {
+      parsedArgs = JSON.parse(cleanArgsResponse);
+    } catch (parseError) {
+      this.logger.error('Fast model generated invalid JSON', {
+        response: cleanArgsResponse,
+        error: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+      throw new Error(`Fast model generated invalid JSON: ${parseError instanceof Error ? parseError.message : 'Unknown parse error'}`);
+    }
+
+    // Validate expected format
+    if (!parsedArgs || typeof parsedArgs !== 'object' || !parsedArgs.args) {
+      this.logger.error('Fast model response missing expected args structure', {
+        response: cleanArgsResponse,
+        parsedArgs: parsedArgs
+      });
+      throw new Error('Fast model response missing expected "args" structure');
+    }
 
     // Strip problematic parameters that the fast model incorrectly adds
     if (parsedArgs.args && parsedArgs.args.max_answer_chars !== undefined) {
@@ -359,7 +396,25 @@ export class ToolSelector {
 
     this.logger.debug(`DEBUG: Full model Stage 2 response: "${cleanArgsResponse}"`);
 
-    const parsedArgs = JSON.parse(cleanArgsResponse);
+    let parsedArgs;
+    try {
+      parsedArgs = JSON.parse(cleanArgsResponse);
+    } catch (parseError) {
+      this.logger.error('Full model generated invalid JSON', {
+        response: cleanArgsResponse,
+        error: parseError instanceof Error ? parseError.message : 'Unknown parse error'
+      });
+      throw new Error(`Full model generated invalid JSON: ${parseError instanceof Error ? parseError.message : 'Unknown parse error'}`);
+    }
+
+    // Validate expected format
+    if (!parsedArgs || typeof parsedArgs !== 'object' || !parsedArgs.args) {
+      this.logger.error('Full model response missing expected args structure', {
+        response: cleanArgsResponse,
+        parsedArgs: parsedArgs
+      });
+      throw new Error('Full model response missing expected "args" structure');
+    }
 
     // Filter out null values from full model response
     if (parsedArgs.args && typeof parsedArgs.args === 'object') {
