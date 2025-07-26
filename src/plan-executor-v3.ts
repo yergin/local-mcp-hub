@@ -16,6 +16,21 @@ export interface ToolMapping {
   rationale: string;
 }
 
+// Search result with context
+export interface SearchMatch {
+  file: string;
+  line: number;
+  content: string;
+}
+
+// Merged search results
+export interface MergedSearchResult {
+  file: string;
+  startLine: number;
+  endLine: number;
+  contextLines: string[];
+}
+
 export class PlanExecutorV3 implements PlanExecutor {
   private logger: winston.Logger;
   private ollamaClient: OllamaClient;
@@ -54,39 +69,83 @@ export class PlanExecutorV3 implements PlanExecutor {
   ): Promise<void> {
     const userMessage = messages.find(msg => msg.role === 'user');
     const userRequest = userMessage?.content || 'No user request found';
-    const projectFileStructure = await projectFileStructureGetter();
 
-    this.logger.info('Plan Executor V3 starting request processing', {
-      userRequest: userRequest.substring(0, 100) + '...',
-      fileCount: projectFileStructure.split('\n').length
+    this.logger.info('Plan Executor V3 starting keyword-based processing', {
+      userRequest: userRequest.substring(0, 100) + '...'
     });
 
     try {
-      // Classify user intent
-      const intent = await this.classifyUserIntent(userRequest);
-      this.logger.debug('V3: User intent classified', { intent });
+      // Run keyword extraction and intent classification in parallel
+      const [keywords, intent] = await Promise.all([
+        this.extractKeywords(userRequest),
+        this.classifyUserIntent(userRequest)
+      ]);
+      this.logger.debug('Keywords and intent determined', { keywords, intent });
 
-      // Classify information type needed
-      const infoType = await this.classifyInformationType(userRequest, intent, projectFileStructure);
-      this.logger.debug('V3: Information type classified', { infoType });
-
-      // Map to tool and target
-      const toolMapping = this.mapToTool(intent, infoType, projectFileStructure);
-      this.logger.debug('V3: Tool mapping determined', toolMapping);
-
-      // Execute the tool
-      const toolResult = await this.executeTool(toolMapping);
-      this.logger.debug('V3: Tool executed', { 
-        tool: toolMapping.tool, 
-        resultLength: toolResult.length 
+      // Search for keywords across all files
+      const searchResults = await this.searchForKeywords(keywords);
+      this.logger.debug('Search completed', { 
+        totalMatches: searchResults.length,
+        files: [...new Set(searchResults.map(r => r.file))]
       });
 
-      // Generate final response
-      await this.generateResponse(userRequest, intent, infoType, toolMapping, toolResult, res);
+      // Merge close results and get context
+      const mergedResults = this.mergeCloseResults(searchResults);
+      this.logger.debug('Results merged', { 
+        mergedCount: mergedResults.length 
+      });
+
+      // Read context around matches
+      const contextualResults = await this.readContextAroundMatches(mergedResults);
+      this.logger.debug('Context gathered', { 
+        contextLength: contextualResults.length 
+      });
+
+      // Evaluate and respond with focused information
+      await this.evaluateAndRespond(userRequest, contextualResults, res);
 
     } catch (error) {
-      this.logger.error('V3: Error in request processing', { error: error instanceof Error ? error.message : 'Unknown error' });
+      this.logger.error('Error in request processing', { error: error instanceof Error ? error.message : 'Unknown error' });
       this.requestProcessor.sendStreamingResponse(res, `I encountered an error while processing your request: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Extract search keywords from user request using fast LLM
+   */
+  private async extractKeywords(userRequest: string): Promise<string[]> {
+    const promptConfig = this.promptManager.getTemplateByPath('v3.keywordExtraction');
+    if (!promptConfig || !promptConfig.template) {
+      this.logger.error('Keyword extraction prompt not found');
+      throw new Error('Keyword extraction prompt configuration missing');
+    }
+
+    const prompt = this.requestProcessor.replaceTemplateVariables(promptConfig.template, {
+      userRequest: userRequest
+    });
+
+    try {
+      const response = await this.ollamaClient.sendToOllama(
+        prompt,
+        promptConfig.temperature!,
+        promptConfig.maxTokens!,
+        promptConfig.useFastModel!
+      );
+
+      // Parse JSON response
+      const parsed = JSON.parse(response.trim());
+      if (parsed.keywords && Array.isArray(parsed.keywords)) {
+        const validKeywords = parsed.keywords.filter((k: any) => typeof k === 'string' && k.length > 2);
+        if (validKeywords.length === 0) {
+          throw new Error('No valid keywords extracted');
+        }
+        return validKeywords;
+      }
+      
+      throw new Error('Invalid keyword response format');
+    } catch (error) {
+      this.logger.error('Keyword extraction failed', { error });
+      throw new Error(`Failed to extract keywords: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -96,12 +155,12 @@ export class PlanExecutorV3 implements PlanExecutor {
   private async classifyUserIntent(userRequest: string): Promise<UserIntent> {
     const promptConfig = this.promptManager.getTemplateByPath('v3.intentClassification');
     if (!promptConfig) {
-      this.logger.error('V3: Intent classification prompt not found');
+      this.logger.error('Intent classification prompt not found');
       return 'UNDERSTAND';
     }
 
     if (!promptConfig.template) {
-      this.logger.error('V3: Intent classification template is empty');
+      this.logger.error('Intent classification template is empty');
       return 'UNDERSTAND';
     }
 
@@ -128,202 +187,254 @@ export class PlanExecutorV3 implements PlanExecutor {
 
       return intentMap[classification] || 'UNDERSTAND'; // Default fallback
     } catch (error) {
-      this.logger.warn('V3: Intent classification failed, using default', { error });
+      this.logger.warn('Intent classification failed, using default', { error });
       return 'UNDERSTAND';
     }
   }
 
   /**
-   * Classify what type of information they need
+   * Search for keywords across all files in workspace
    */
-  private async classifyInformationType(userRequest: string, intent: UserIntent, projectFiles: string): Promise<InformationType> {
-    const promptConfig = this.promptManager.getTemplateByPath('v3.informationTypeClassification');
-    if (!promptConfig) {
-      this.logger.error('V3: Information type classification prompt not found');
-      return 'OVERVIEW';
+  private async searchForKeywords(keywords: string[]): Promise<SearchMatch[]> {
+    const allMatches: SearchMatch[] = [];
+
+    // Split compound keywords by space and hyphen
+    const expandedKeywords: string[] = [];
+    for (const keyword of keywords) {
+      const parts = keyword.split(/[\s-]+/).filter(part => part.length > 2);
+      expandedKeywords.push(...parts);
     }
 
-    if (!promptConfig.template) {
-      this.logger.error('V3: Information type classification template is empty');
-      return 'OVERVIEW';
+    // Remove duplicates
+    const uniqueKeywords = [...new Set(expandedKeywords)];
+
+    for (const keyword of uniqueKeywords) {
+      try {
+        this.logger.debug(`Searching for keyword "${keyword}"`);
+        
+        // Use search_for_pattern to find the keyword
+        const result = await this.mcpManager.callMCPTool('search_for_pattern', {
+          substring_pattern: keyword,
+          path: '.'
+        });
+
+        // Parse the search results
+        const matches = this.parseSearchResults(result, keyword);
+        allMatches.push(...matches);
+        
+      } catch (error) {
+        this.logger.warn(`Search failed for keyword "${keyword}"`, { error });
+      }
+    }
+
+    return allMatches;
+  }
+
+  /**
+   * Parse search results from MCP tool response
+   */
+  private parseSearchResults(searchResult: string, keyword: string): SearchMatch[] {
+    const matches: SearchMatch[] = [];
+    
+    try {
+      // Parse JSON response from serena search tool
+      const parsed = JSON.parse(searchResult);
+      
+      // Iterate through files in the response
+      for (const [fileName, results] of Object.entries(parsed)) {
+        if (Array.isArray(results)) {
+          for (const result of results) {
+            // Parse line like "  > 154:6. **Response**: content..."
+            const lineMatch = result.match(/>\s*(\d+):(.*)/);
+            if (lineMatch) {
+              const [, lineNum, content] = lineMatch;
+              matches.push({
+                file: fileName,
+                line: parseInt(lineNum),
+                content: content.trim()
+              });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.warn('Failed to parse search results', { error, keyword, searchResult });
+    }
+
+    return matches;
+  }
+
+  /**
+   * Merge search results that are close together (within 5 lines)
+   */
+  private mergeCloseResults(searchResults: SearchMatch[]): MergedSearchResult[] {
+    const merged: MergedSearchResult[] = [];
+    
+    // Group by file
+    const byFile = new Map<string, SearchMatch[]>();
+    for (const match of searchResults) {
+      if (!byFile.has(match.file)) {
+        byFile.set(match.file, []);
+      }
+      byFile.get(match.file)!.push(match);
+    }
+
+    // Merge close matches within each file
+    for (const [file, matches] of byFile) {
+      // Sort by line number
+      matches.sort((a, b) => a.line - b.line);
+      
+      let currentGroup: SearchMatch[] = [];
+      
+      for (const match of matches) {
+        if (currentGroup.length === 0) {
+          currentGroup = [match];
+        } else {
+          const lastLine = currentGroup[currentGroup.length - 1].line;
+          if (match.line - lastLine <= 5) {
+            // Within 5 lines, add to current group
+            currentGroup.push(match);
+          } else {
+            // Too far, create new group
+            merged.push(this.createMergedResult(file, currentGroup));
+            currentGroup = [match];
+          }
+        }
+      }
+      
+      // Add final group
+      if (currentGroup.length > 0) {
+        merged.push(this.createMergedResult(file, currentGroup));
+      }
+    }
+
+    return merged;
+  }
+
+  /**
+   * Create a merged result from a group of close matches
+   */
+  private createMergedResult(file: string, matches: SearchMatch[]): MergedSearchResult {
+    const lines = matches.map(m => m.line);
+    const minLine = Math.min(...lines);
+    const maxLine = Math.max(...lines);
+    
+    return {
+      file,
+      startLine: Math.max(1, minLine - 3), // 3 lines of context before
+      endLine: maxLine + 3, // 3 lines of context after
+      contextLines: [] // Will be filled by readContextAroundMatches
+    };
+  }
+
+  /**
+   * Read context around each merged search result
+   */
+  private async readContextAroundMatches(mergedResults: MergedSearchResult[]): Promise<string> {
+    const contextSections: string[] = [];
+
+    // Sort results by file depth (reverse order - deepest files first, root files last)
+    const sortedResults = mergedResults.sort((a, b) => {
+      const depthA = a.file.split('/').length;
+      const depthB = b.file.split('/').length;
+      return depthB - depthA; // Reverse order: deeper files first, root files last
+    });
+
+    for (const result of sortedResults) {
+      try {
+        this.logger.debug(`Reading context for ${result.file}:${result.startLine}-${result.endLine}`);
+        
+        // Read the specific line range from the file
+        const fileContent = await this.mcpManager.callMCPTool('read_file', {
+          file_path: result.file,
+          start_line: result.startLine,
+          max_lines: result.endLine - result.startLine + 1
+        });
+
+        // Format the context nicely
+        const section = `=== ${result.file} (lines ${result.startLine}-${result.endLine}) ===\n${fileContent}\n`;
+        contextSections.push(section);
+        
+      } catch (error) {
+        this.logger.warn(`Failed to read context for ${result.file}`, { error });
+        contextSections.push(`=== ${result.file} ===\n[Error reading file: ${error instanceof Error ? error.message : 'Unknown error'}]\n`);
+      }
+    }
+
+    return contextSections.join('\n');
+  }
+
+  /**
+   * Evaluate if contextual results answer the question and respond accordingly
+   */
+  private async evaluateAndRespond(userRequest: string, contextualResults: string, res: any): Promise<void> {
+    const promptConfig = this.promptManager.getTemplateByPath('v3.evaluateAndRespond');
+    if (!promptConfig || !promptConfig.template) {
+      this.logger.error('Evaluate and respond prompt not found or empty');
+      this.sendFallbackResponse(contextualResults, res);
+      return;
+    }
+
+    // If no contextual results found, indicate that
+    if (!contextualResults.trim()) {
+      this.sendNeedMoreInfoResponse('No relevant information found', 'No matches found for the search keywords', res);
+      return;
     }
 
     const prompt = this.requestProcessor.replaceTemplateVariables(promptConfig.template, {
-      intent: intent,
       userRequest: userRequest,
-      projectFiles: projectFiles.split('\n').slice(0, 20).join(', ')
+      toolResult: contextualResults.substring(0, 4000) // Allow more context than before
     });
 
     try {
       const response = await this.ollamaClient.sendToOllama(
-        prompt, 
-        promptConfig.temperature!, 
-        promptConfig.maxTokens!, 
+        prompt,
+        promptConfig.temperature!,
+        promptConfig.maxTokens!,
         promptConfig.useFastModel!
       );
-      const classification = response.trim().toUpperCase();
-      
-      const typeMap: { [key: string]: InformationType } = {
-        'A': 'OVERVIEW',
-        'B': 'SOURCE',
-        'C': 'CONFIG', 
-        'D': 'EXPLORE'
-      };
 
-      return typeMap[classification] || 'OVERVIEW'; // Default fallback
-    } catch (error) {
-      this.logger.warn('V3: Information type classification failed, using default', { error });
-      return 'OVERVIEW';
-    }
-  }
-
-  /**
-   * Deterministically map intent + info type to tool and target
-   */
-  private mapToTool(intent: UserIntent, infoType: InformationType, projectFiles: string): ToolMapping {
-    const files = projectFiles.split('\n').filter(f => f.trim());
-    
-    // Find common file types
-    const hasReadme = files.find(f => f.toLowerCase().includes('readme'));
-    const hasConfig = files.find(f => f.includes('config.json') || f.includes('.env') || f.includes('config'));
-    const hasSrcDir = files.find(f => f.startsWith('src/'));
-    const hasMainFile = files.find(f => f.includes('main.') || f.includes('app.') || f.includes('index.'));
-
-    // Deterministic mapping based on intent + info type
-    const mapping: { [key: string]: ToolMapping } = {
-      // UNDERSTAND intents
-      'UNDERSTAND_OVERVIEW': {
-        tool: 'read_file',
-        target: hasReadme || 'README.md',
-        rationale: 'README provides project overview for understanding'
-      },
-      'UNDERSTAND_SOURCE': {
-        tool: 'read_file', 
-        target: hasMainFile || hasSrcDir || files[0],
-        rationale: 'Main implementation files for understanding functionality'
-      },
-      'UNDERSTAND_CONFIG': {
-        tool: 'read_file',
-        target: hasConfig || 'config.json',
-        rationale: 'Configuration files for understanding setup'
-      },
-      'UNDERSTAND_EXPLORE': {
-        tool: 'list_dir',
-        target: '.',
-        rationale: 'Directory listing for understanding project structure'
-      },
-
-      // FIND intents  
-      'FIND_OVERVIEW': {
-        tool: 'search_for_pattern',
-        target: '.',
-        rationale: 'Search documentation for specific information'
-      },
-      'FIND_SOURCE': {
-        tool: 'search_for_pattern', 
-        target: 'src',
-        rationale: 'Search source code for specific functionality'
-      },
-      'FIND_CONFIG': {
-        tool: 'find_file',
-        target: '*config*',
-        rationale: 'Find configuration files'
-      },
-      'FIND_EXPLORE': {
-        tool: 'find_file',
-        target: '*',
-        rationale: 'Find files by pattern'
-      },
-
-      // Other intents (simplified for now)
-      'FIX_OVERVIEW': {
-        tool: 'read_file',
-        target: hasReadme || 'README.md', 
-        rationale: 'Check documentation for troubleshooting info'
-      },
-      'BUILD_SOURCE': {
-        tool: 'read_file',
-        target: hasMainFile || hasSrcDir || files[0],
-        rationale: 'Understand existing code before building'
-      },
-      'CONFIGURE_CONFIG': {
-        tool: 'read_file',
-        target: hasConfig || 'config.json',
-        rationale: 'Read current configuration'
+      if (response.trim().startsWith('NEED_MORE_INFO')) {
+        const explanation = response.replace('NEED_MORE_INFO', '').trim();
+        this.sendNeedMoreInfoResponse(contextualResults, explanation, res);
+      } else {
+        this.requestProcessor.sendStreamingResponse(res, response);
       }
-    };
-
-    const key = `${intent}_${infoType}`;
-    return mapping[key] || {
-      tool: 'read_file',
-      target: hasReadme || files[0] || 'README.md',
-      rationale: 'Default fallback to documentation'
-    };
-  }
-
-  /**
-   * Execute the selected tool with simple argument generation
-   */
-  private async executeTool(mapping: ToolMapping): Promise<string> {
-    try {
-      const args = this.generateToolArguments(mapping.tool, mapping.target);
-      this.logger.debug('V3: Generated tool arguments', { tool: mapping.tool, args });
-      
-      return await this.mcpManager.callMCPTool(mapping.tool, args);
     } catch (error) {
-      this.logger.error('V3: Tool execution failed', { error, mapping });
-      return `Error executing ${mapping.tool}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      this.logger.error('Evaluation failed', { error });
+      this.sendFallbackResponse(contextualResults, res);
     }
   }
 
   /**
-   * Generate tool arguments directly - no complex reasoning needed
+   * Send fallback response when evaluation fails
    */
-  private generateToolArguments(tool: string, target: string): any {
-    switch(tool) {
-      case 'read_file':
-        return { file_path: target };
-      
-      case 'search_for_pattern':
-        return { 
-          pattern: target,
-          path: '.'
-        };
-      
-      case 'list_dir':
-        return { path: target || '.' };
-      
-      case 'find_file':
-        return { file_mask: target };
-      
-      default:
-        this.logger.warn(`V3: Unsupported tool ${tool}, using basic args`);
-        return { path: target || '.' };
+  private sendFallbackResponse(toolResult: string, res: any): void {
+    const template = this.promptManager.getTemplateByPath('v3.fallbackResponse');
+    if (template?.template) {
+      const response = this.requestProcessor.replaceTemplateVariables(template.template, {
+        toolResult: toolResult.substring(0, 1000)
+      });
+      this.requestProcessor.sendStreamingResponse(res, response);
+    } else {
+      this.requestProcessor.sendStreamingResponse(res, toolResult.substring(0, 1000));
     }
   }
 
   /**
-   * Generate final response based on tool results
+   * Send response when more information is needed
    */
-  private async generateResponse(
-    userRequest: string, 
-    intent: UserIntent, 
-    infoType: InformationType, 
-    toolMapping: ToolMapping, 
-    toolResult: string, 
-    res: any
-  ): Promise<void> {
-    const response = `Based on your request: "${userRequest}"
-
-I classified this as a ${intent} intent requiring ${infoType} information.
-
-I used ${toolMapping.tool} to examine ${toolMapping.target} and found:
-
-${toolResult.substring(0, 2000)}${toolResult.length > 2000 ? '\n\n[Response truncated for brevity]' : ''}
-
-Does this help answer your question?`;
-
-    this.requestProcessor.sendStreamingResponse(res, response);
+  private sendNeedMoreInfoResponse(toolResult: string, explanation: string, res: any): void {
+    const template = this.promptManager.getTemplateByPath('v3.needMoreInfoResponse');
+    if (template?.template) {
+      const response = this.requestProcessor.replaceTemplateVariables(template.template, {
+        partialResult: toolResult.substring(0, 500) + (toolResult.length > 500 ? '...' : ''),
+        explanation: explanation
+      });
+      this.requestProcessor.sendStreamingResponse(res, response);
+    } else {
+      this.sendFallbackResponse(toolResult, res);
+    }
   }
 
 }

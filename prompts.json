@@ -74,11 +74,29 @@
       "maxTokens": 10,
       "useFastModel": true
     },
+    "keywordExtraction": {
+      "template": "Extract 3-5 key search terms from this user request: \"{userRequest}\"\n\nFocus on:\n- Technical terms, function names, file types\n- Action words (reload, configure, install, etc.)\n- Domain-specific terms\n- Avoid common words like 'the', 'can', 'how', 'what'\n\nRespond with JSON only: {\"keywords\": [\"term1\", \"term2\", \"term3\"]}",
+      "temperature": 0.1,
+      "maxTokens": 50,
+      "useFastModel": true
+    },
     "informationTypeClassification": {
       "template": "User Intent: {intent}\nUser Request: \"{userRequest}\"\nAvailable Files: {projectFiles}...\n\nBased on the {intent} intent, what type of information do they need?\nA) OVERVIEW - Documentation, README, general understanding\nB) SOURCE - Specific source code, implementation details\nC) CONFIG - Configuration files, settings, setup\nD) EXPLORE - Directory structure, file organization\n\nRespond with just the letter: A, B, C, or D",
       "temperature": 0.1,
       "maxTokens": 10,
       "useFastModel": true
+    },
+    "evaluateAndRespond": {
+      "template": "User Question: \"{userRequest}\"\n\nTool Result:\n{toolResult}\n\nEvaluate: Does this tool result contain COMPLETE, SPECIFIC, ACTIONABLE information to fully answer the user's question?\n\nBe extremely strict. You must be able to provide a definitive answer with direct quotes from the tool result as evidence.\n\nIf you have complete information:\n- Start your response with the direct answer\n- Include the exact quote(s) from the tool result that support your answer\n- Format quotes like: \"According to the documentation: '[exact quote here]'\"\n\nIf the information is incomplete, too general, missing key details, or you cannot find specific quotes to support a complete answer:\n- Start your response with exactly \"NEED_MORE_INFO\" (nothing before it)\n- Follow with what specific additional information is needed\n\nRemember: It's better to ask for more information than give an incomplete or uncertain answer.",
+      "temperature": 0.1,
+      "maxTokens": 500,
+      "useFastModel": false
+    },
+    "needMoreInfoResponse": {
+      "template": "I found some information, but I need more details to fully answer your question.\n\nWhat I found:\n{partialResult}\n\n{explanation}\n\nWould you like me to look for additional information, or does this partially help?"
+    },
+    "fallbackResponse": {
+      "template": "I found this information: {toolResult}"
     }
   },
   "codeCompletion": {
