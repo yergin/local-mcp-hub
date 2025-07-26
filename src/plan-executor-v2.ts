@@ -21,17 +21,29 @@ export class PlanExecutorV2 implements PlanExecutor {
   private config: PlanExecutorV2Config;
 
   constructor(
+    fullConfig: any, // Full hub configuration
     ollamaClient: OllamaClient,
     requestProcessor: RequestProcessor,
     promptManager: PromptManager,
-    config: PlanExecutorV2Config,
     logger: winston.Logger
   ) {
     this.ollamaClient = ollamaClient;
     this.requestProcessor = requestProcessor;
     this.promptManager = promptManager;
-    this.config = config;
     this.logger = logger;
+    
+    // Extract executor-specific configuration with defaults
+    this.config = this.extractConfig(fullConfig);
+  }
+
+  private extractConfig(fullConfig: any): PlanExecutorV2Config {
+    // Extract V2 executor configuration with sensible defaults
+    const planConfig = fullConfig.planExecutorV2 || {};
+    
+    return {
+      // V2 config can be empty for now, or add V2-specific settings later
+      // Example: parallelTaskLimit: planConfig.parallelTaskLimit || 5
+    };
   }
 
   /**

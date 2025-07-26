@@ -111,12 +111,12 @@ export class PlanExecutorV1 implements PlanExecutor {
   private config: PlanExecutorConfig;
 
   constructor(
+    fullConfig: any, // Full hub configuration
     ollamaClient: OllamaClient,
     toolSelector: ToolSelector,
     requestProcessor: RequestProcessor,
     mcpManager: MCPManager,
     promptManager: PromptManager,
-    config: PlanExecutorConfig,
     logger: winston.Logger
   ) {
     this.ollamaClient = ollamaClient;
@@ -124,8 +124,21 @@ export class PlanExecutorV1 implements PlanExecutor {
     this.requestProcessor = requestProcessor;
     this.mcpManager = mcpManager;
     this.promptManager = promptManager;
-    this.config = config;
     this.logger = logger;
+    
+    // Extract executor-specific configuration with defaults
+    this.config = this.extractConfig(fullConfig);
+  }
+
+  private extractConfig(fullConfig: any): PlanExecutorConfig {
+    // Extract V1 executor configuration with sensible defaults
+    const planConfig = fullConfig.planExecutor || {};
+    
+    return {
+      stepLimit: planConfig.stepLimit || 10,
+      totalIterationLimit: planConfig.totalIterationLimit || 50,
+      stepIterationLimit: planConfig.stepIterationLimit || 10
+    };
   }
 
   /**

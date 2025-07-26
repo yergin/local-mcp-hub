@@ -12,10 +12,10 @@ import {
   ToolSelectionConfig,
   ArgumentGenerationConfig,
 } from './tool-selector';
-import { RequestProcessor, SystemMessageConfig } from './request-processor';
+import { RequestProcessor } from './request-processor';
 import { PlanExecutor } from './plan-executor';
-import { PlanExecutorV1, PlanExecutorConfig, PlanResponse, ResponseGenerationConfig } from './plan-executor-v1';
-import { PlanExecutorV2, PlanExecutorV2Config } from './plan-executor-v2';
+import { PlanExecutorV1 } from './plan-executor-v1';
+import { PlanExecutorV2 } from './plan-executor-v2';
 import { PromptManager } from './prompt-manager';
 
 // Prompts configuration interfaces
@@ -174,33 +174,22 @@ class LocalMCPHub {
       logger
     );
     
-    // Initialize plan executor
-    const planExecutorConfig: PlanExecutorConfig = {
-      stepLimit: 10,
-      totalIterationLimit: 50,
-      stepIterationLimit: 10
-    };
-    
+    // Initialize plan executors with full config
     this.planExecutor = new PlanExecutorV1(
+      this.config,
       this.ollamaClient,
       this.toolSelector,
       this.requestProcessor,
       this.mcpManager,
       this.promptManager,
-      planExecutorConfig,
       logger
     );
-
-    // Initialize V2 plan executor
-    const planExecutorV2Config: PlanExecutorV2Config = {
-      // V2 config can be empty for now
-    };
     
     this.planExecutorV2 = new PlanExecutorV2(
+      this.config,
       this.ollamaClient,
       this.requestProcessor,
       this.promptManager,
-      planExecutorV2Config,
       logger
     );
 
