@@ -109,6 +109,13 @@ export class PromptManager {
   }
 
   /**
+   * Get data by path
+   */
+  getData(path: string): any {
+    return this.templates[path as keyof PromptTemplates];
+  }
+
+  /**
    * Get tool guidance configuration
    */
   getToolGuidance(): {

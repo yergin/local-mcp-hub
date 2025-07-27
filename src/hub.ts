@@ -137,7 +137,6 @@ const logMCPResponse = (mcpName: string, method: string, success: boolean, data?
 class LocalMCPHub {
   private app: express.Application;
   private config: Config;
-  private prompts: PromptsConfig;
   private promptManager: PromptManager;
   private ollamaClient: OllamaClient;
   private mcpManager: MCPManager;
@@ -153,7 +152,6 @@ class LocalMCPHub {
   constructor() {
     this.app = express();
     this.config = this.loadConfig();
-    this.prompts = this.loadPrompts();
     this.ensureTmpDirectory();
 
     // Initialize prompt manager
@@ -165,19 +163,19 @@ class LocalMCPHub {
     this.mcpManager = new MCPManager(
       this.config.mcps, 
       logger, 
-      this.prompts.toolGuidance?.argumentHints,
-      this.prompts.toolGuidance?.usageHints
+      this.promptManager.getData('toolGuidance.argumentHints'),
+      this.promptManager.getData('toolGuidance.usageHints')
     );
     this.toolSelector = new ToolSelector(
       this.ollamaClient,
-      this.prompts.toolGuidance || {},
-      this.prompts.v1?.toolSelection as any,
-      this.prompts.v1?.argumentGeneration as any,
+      this.promptManager.getData('toolGuidance') || {},
+      this.promptManager.getData('v1.toolSelection'),
+      this.promptManager.getData('v1.argumentGeneration'),
       logger
     );
     this.requestProcessor = new RequestProcessor(
       this.ollamaClient,
-      this.prompts.systemMessages || {},
+      this.promptManager.getData('systemMessages') || {},
       this.toolSelector,
       logger
     );
@@ -271,18 +269,6 @@ class LocalMCPHub {
     }
   }
 
-  private loadPrompts(): PromptsConfig {
-    try {
-      const promptsPath = path.join(__dirname, '..', 'prompts.json');
-      const promptsData = fs.readFileSync(promptsPath, 'utf-8');
-      const prompts = JSON.parse(promptsData) as PromptsConfig;
-      logger.info('Prompts configuration loaded');
-      return prompts;
-    } catch (error) {
-      logger.error('Failed to load prompts configuration:', error);
-      process.exit(1);
-    }
-  }
 
   private getTmpPath(...segments: string[]): string {
     return path.join(__dirname, '..', '.tmp', ...segments);
@@ -541,7 +527,7 @@ class LocalMCPHub {
         // Check if all MCP processes are ready yet
         if (!this.mcpManager.areAllProcessesReady) {
           logger.warn('MCP tools not yet ready, sending initialization message');
-          const initMessage = this.prompts.systemMessages!.mcpInitializing!.template!.replace(
+          const initMessage = this.promptManager.getData('systemMessages.mcpInitializing')?.template?.replace(
             '{port}',
             this.config.hub.port.toString()
           );
@@ -649,7 +635,7 @@ class LocalMCPHub {
           filePathLines.length > 0 ? filePathLines[filePathLines.length - 1] : '';
 
         // Create context-aware completion prompt using template
-        const completionTemplate = this.prompts.codeCompletion.completion.template!;
+        const completionTemplate = this.promptManager.getData('codeCompletion.completion')?.template;
         const templateVariables: Record<string, string> = {
           filePath: languageContext.replace('// Path: ', ''),
           codeBeforeCursor: codeBeforeCursor,
@@ -669,7 +655,7 @@ class LocalMCPHub {
         });
 
         // Get completion from Ollama using configured settings
-        const completionConfig = this.prompts.codeCompletion.completion;
+        const completionConfig = this.promptManager.getData('codeCompletion.completion');
         const rawSuggestion = await this.ollamaClient.sendToOllama(
           completionPrompt,
           completionConfig.temperature,
@@ -891,24 +877,21 @@ class LocalMCPHub {
         // Reload prompts in the centralized manager
         this.promptManager.reloadPrompts();
         
-        // Also reload the old prompts for backward compatibility
-        this.prompts = this.loadPrompts();
-        
         // Update all components with new prompts configuration
         this.toolSelector.updateConfig(
-          this.prompts.toolGuidance || {},
-          this.prompts.v1?.toolSelection as any,
-          this.prompts.v1?.argumentGeneration as any
+          this.promptManager.getData('toolGuidance') || {},
+          this.promptManager.getData('v1.toolSelection'),
+          this.promptManager.getData('v1.argumentGeneration')
         );
         
         this.requestProcessor.updateConfig(
-          this.prompts.systemMessages || {}
+          this.promptManager.getData('systemMessages') || {}
         );
 
         // Update MCP Manager with new argument and usage hints
         this.mcpManager.updateHints(
-          this.prompts.toolGuidance?.argumentHints,
-          this.prompts.toolGuidance?.usageHints
+          this.promptManager.getData('toolGuidance.argumentHints'),
+          this.promptManager.getData('toolGuidance.usageHints')
         );
         
         logger.info('Prompts configuration reloaded successfully');
