@@ -23,9 +23,11 @@ AI Code Principles
 
    4.2 If a function needs a comment, it probably requires a better name or to be split up into simpler functions
 
-   4.3 Comments should not describe or explain changes to the code
+   4.3 Comments should not describe or explain changes to the code nor versions
 
-   4.4 Function comments should not refer to code that calls the function unless there is a problem with the use of the function
+   4.4 Avoid numbered steps as creates more work if later changing the steps order
+
+   4.4 Function comments should not refer to code that calls the function unless a special case has been added for the caller (which should be avoided)
 
    4.5 No emojis in comments
 
@@ -36,3 +38,7 @@ AI Code Principles
    5.2 Make functions generic where possible
 
    5.3 Separation of Concerns: split concerns up at every level into separate modules, files, classes, functions and data structures.
+
+   5.4 Favour designs that don't use magic numbers and prefer automatically calculated values to configs
+
+   5.5 Be careful to not overfit the design to the test data, make it flexible

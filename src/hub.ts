@@ -18,6 +18,7 @@ import { PlanExecutorV1 } from './plan-executor-v1';
 import { PlanExecutorV2 } from './plan-executor-v2';
 import { PlanExecutorV3 } from './plan-executor-v3';
 import { PromptManager } from './prompt-manager';
+import { FileIndexer, FileType } from './file-indexer';
 
 // Prompts configuration interfaces
 interface PromptConfig {
@@ -148,6 +149,7 @@ class LocalMCPHub {
   private selectedExecutor: PlanExecutor;
   private cachedProjectFileStructure: string | null = null;
   private projectFileStructureTimestamp: number = 0;
+  private fileIndexer: FileIndexer;
 
   constructor() {
     this.app = express();
@@ -211,6 +213,10 @@ class LocalMCPHub {
 
     // Select which executor to use based on configuration
     this.selectedExecutor = this.selectExecutor();
+
+    // Initialize file indexer
+    const indexPath = this.getTmpPath('file-index.txt');
+    this.fileIndexer = new FileIndexer(this.mcpManager, logger, indexPath);
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -311,7 +317,30 @@ class LocalMCPHub {
 
       logger.debug(forceRefresh ? 'Refreshing project file structure' : 'Building initial project file structure');
 
-      // Get recursive directory listing and prune to 1 level deep
+      // Try to use the file indexer for enhanced context
+      try {
+        // Check if indexer is ready or wait briefly for it
+        if (!this.fileIndexer.isReady) {
+          logger.debug('File indexer not ready yet, falling back to basic listing');
+        } else {
+          const context = await this.fileIndexer.getContextForLLM([
+            FileType.Code,
+            FileType.Configuration,
+            FileType.BuildScript,
+            FileType.Documentation
+          ]);
+          
+          // Cache the result
+          this.cachedProjectFileStructure = context;
+          this.projectFileStructureTimestamp = Date.now();
+          
+          return context;
+        }
+      } catch (indexError) {
+        logger.warn('File indexer error, falling back to basic listing', { error: indexError });
+      }
+      
+      // Fall back to original implementation
       const result = await this.mcpManager.callMCPTool('list_dir', { 
         relative_path: '.', 
         recursive: true 
@@ -473,6 +502,7 @@ class LocalMCPHub {
         mcps_enabled: this.config.mcps.enabled.length,
         mcp_tools_initialized: this.mcpManager.isInitialized,
         mcp_tools_count: this.mcpManager.toolCount,
+        file_indexer_ready: this.fileIndexer.isReady,
       });
     });
 
@@ -944,6 +974,11 @@ class LocalMCPHub {
 
       // Initialize MCP tool schemas and keep processes alive
       await this.mcpManager.initializeMCPSchemas();
+      
+      // Start building file index in the background (non-blocking)
+      this.fileIndexer.startBackgroundIndexing().catch(error => {
+        logger.error('Failed to start background indexing', { error });
+      });
     });
   }
 }
