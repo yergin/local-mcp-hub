@@ -408,8 +408,12 @@ export class PlanExecutorV3 implements PlanExecutor {
 
     // Sort results by relevance: keyword density, unique keywords, then file depth
     const sortedResults = this.sortResultsByRelevance(mergedResults);
+    
+    // Take top 20 and reverse order (lowest relevance first for final presentation)
+    const top20Results = sortedResults.slice(0, 20);
+    const finalResults = [...top20Results].reverse();
 
-    for (const result of sortedResults) {
+    for (const result of finalResults) {
       try {
         this.logger.debug(`Reading context for ${result.file}:${result.startLine}-${result.endLine}`);
         
@@ -495,19 +499,8 @@ export class PlanExecutorV3 implements PlanExecutor {
       return contextualResults;
     }
 
-    // Trim to maximum of 20 snippets (they are already sorted by relevance, so take the top 20)
-    const trimmedSections = snippetSections.slice(0, 20);
-    
-    if (trimmedSections.length < snippetSections.length) {
-      this.logger.debug('Trimmed snippets for filtering', {
-        original: snippetSections.length,
-        trimmed: trimmedSections.length
-      });
-    }
-
-    // Create numbered snippets without line numbers for filtering (in reverse order)
-    const reversedSections = [...trimmedSections].reverse();
-    const numberedSnippets = reversedSections.map((section, index) => {
+    // Create numbered snippets without line numbers for filtering
+    const numberedSnippets = snippetSections.map((section, index) => {
       const lines = section.trim().split('\n');
       // Remove line number formatting for cleaner presentation
       const cleanLines = lines.map(line => {
@@ -537,16 +530,10 @@ export class PlanExecutorV3 implements PlanExecutor {
         return contextualResults;
       }
 
-      // Map selected numbers back to original sections (accounting for reverse order)
+      // Map selected numbers back to original sections
       const originalSections = contextualResults.split(/(?=^=== .* ===)/m).filter(section => section.trim());
       const filteredSections = selectedNumbers
-        .map(num => {
-          // Reverse the index since we presented them in reverse order
-          const reverseIndex = reversedSections.length - num;
-          // Find the corresponding section in the original results
-          const targetSection = reversedSections[num - 1];
-          return originalSections.find(section => section.trim() === targetSection.trim());
-        })
+        .map(num => originalSections[num - 1])
         .filter(section => section);
 
       const filteredResult = filteredSections.join('\n');
