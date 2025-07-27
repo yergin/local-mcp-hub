@@ -21,6 +21,7 @@ export interface SearchMatch {
   file: string;
   line: number;
   content: string;
+  matchedKeywords: string[]; // Keywords that matched on this line
 }
 
 // Merged search results
@@ -29,6 +30,8 @@ export interface MergedSearchResult {
   startLine: number;
   endLine: number;
   contextLines: string[];
+  allUniqueKeywords: string[]; // All unique keywords found in this snippet
+  maxUniqueKeywordsPerLine: number; // Max unique keywords found on any single line
 }
 
 export class PlanExecutorV3 implements PlanExecutor {
@@ -83,10 +86,11 @@ export class PlanExecutorV3 implements PlanExecutor {
       this.logger.debug('Keywords and intent determined', { keywords, intent });
 
       // Search for keywords across all files
-      const searchResults = await this.searchForKeywords(keywords);
+      const { matches: searchResults, expandedKeywords } = await this.searchForKeywords(keywords);
       this.logger.debug('Search completed', { 
         totalMatches: searchResults.length,
-        files: [...new Set(searchResults.map(r => r.file))]
+        files: [...new Set(searchResults.map(r => r.file))],
+        expandedKeywords
       });
 
       // Merge close results and get context
@@ -96,13 +100,20 @@ export class PlanExecutorV3 implements PlanExecutor {
       });
 
       // Read context around matches
-      const contextualResults = await this.readContextAroundMatches(mergedResults);
+      const contextualResults = await this.readContextAroundMatches(mergedResults, expandedKeywords);
       this.logger.debug('Context gathered', { 
         contextLength: contextualResults.length 
       });
 
+      // Filter snippets by relevance
+      const filteredResults = await this.filterSnippetsByRelevance(userRequest, contextualResults);
+      this.logger.debug('Snippets filtered', { 
+        originalLength: contextualResults.length,
+        filteredLength: filteredResults.length 
+      });
+
       // Evaluate and respond with focused information
-      await this.evaluateAndRespond(userRequest, contextualResults, res);
+      await this.evaluateAndRespond(userRequest, filteredResults, res);
 
     } catch (error) {
       this.logger.error('Error in request processing', { error: error instanceof Error ? error.message : 'Unknown error' });
@@ -195,7 +206,7 @@ export class PlanExecutorV3 implements PlanExecutor {
   /**
    * Search for keywords across all files in workspace
    */
-  private async searchForKeywords(keywords: string[]): Promise<SearchMatch[]> {
+  private async searchForKeywords(keywords: string[]): Promise<{ matches: SearchMatch[], expandedKeywords: string[] }> {
     const allMatches: SearchMatch[] = [];
 
     // Split compound keywords by space and hyphen
@@ -227,7 +238,7 @@ export class PlanExecutorV3 implements PlanExecutor {
       }
     }
 
-    return allMatches;
+    return { matches: allMatches, expandedKeywords: uniqueKeywords };
   }
 
   /**
@@ -251,7 +262,8 @@ export class PlanExecutorV3 implements PlanExecutor {
               matches.push({
                 file: fileName,
                 line: parseInt(lineNum),
-                content: content.trim()
+                content: content.trim(),
+                matchedKeywords: [keyword]
               });
             }
           }
@@ -265,10 +277,16 @@ export class PlanExecutorV3 implements PlanExecutor {
   }
 
   /**
-   * Merge search results that are close together (within 5 lines)
+   * Merge search results that are close together
    */
   private mergeCloseResults(searchResults: SearchMatch[]): MergedSearchResult[] {
     const merged: MergedSearchResult[] = [];
+    
+    // Get merge distance from config
+    const v3Config = this.promptManager.getTemplateByPath('v3') as any;
+    const linesBefore = v3Config?.linesBefore || 5;
+    const linesAfter = v3Config?.linesAfter || 15;
+    const mergeDistance = linesBefore + linesAfter + 1;
     
     // Group by file
     const byFile = new Map<string, SearchMatch[]>();
@@ -291,12 +309,12 @@ export class PlanExecutorV3 implements PlanExecutor {
           currentGroup = [match];
         } else {
           const lastLine = currentGroup[currentGroup.length - 1].line;
-          if (match.line - lastLine <= 5) {
-            // Within 5 lines, add to current group
+          if (match.line - lastLine <= mergeDistance) {
+            // Within merge distance, add to current group
             currentGroup.push(match);
           } else {
             // Too far, create new group
-            merged.push(this.createMergedResult(file, currentGroup));
+            merged.push(this.createMergedResult(file, currentGroup, linesBefore, linesAfter));
             currentGroup = [match];
           }
         }
@@ -304,7 +322,7 @@ export class PlanExecutorV3 implements PlanExecutor {
       
       // Add final group
       if (currentGroup.length > 0) {
-        merged.push(this.createMergedResult(file, currentGroup));
+        merged.push(this.createMergedResult(file, currentGroup, linesBefore, linesAfter));
       }
     }
 
@@ -314,31 +332,82 @@ export class PlanExecutorV3 implements PlanExecutor {
   /**
    * Create a merged result from a group of close matches
    */
-  private createMergedResult(file: string, matches: SearchMatch[]): MergedSearchResult {
+  private createMergedResult(file: string, matches: SearchMatch[], linesBefore: number, linesAfter: number): MergedSearchResult {
     const lines = matches.map(m => m.line);
     const minLine = Math.min(...lines);
     const maxLine = Math.max(...lines);
     
+    // Collect all unique keywords across all matches
+    const allUniqueKeywords = [...new Set(matches.flatMap(m => m.matchedKeywords))];
+    
+    // Calculate max unique keywords per line by grouping matches by line number
+    const matchesByLine = new Map<number, SearchMatch[]>();
+    for (const match of matches) {
+      if (!matchesByLine.has(match.line)) {
+        matchesByLine.set(match.line, []);
+      }
+      matchesByLine.get(match.line)!.push(match);
+    }
+    
+    let maxUniqueKeywordsPerLine = 0;
+    for (const [lineNum, lineMatches] of matchesByLine) {
+      const uniqueKeywordsOnLine = [...new Set(lineMatches.flatMap(m => m.matchedKeywords))];
+      maxUniqueKeywordsPerLine = Math.max(maxUniqueKeywordsPerLine, uniqueKeywordsOnLine.length);
+    }
+    
     return {
       file,
-      startLine: Math.max(1, minLine - 3), // 3 lines of context before
-      endLine: maxLine + 3, // 3 lines of context after
-      contextLines: [] // Will be filled by readContextAroundMatches
+      startLine: Math.max(1, minLine - linesBefore),
+      endLine: maxLine + linesAfter,
+      contextLines: [], // Will be filled by readContextAroundMatches
+      allUniqueKeywords,
+      maxUniqueKeywordsPerLine
     };
+  }
+
+  /**
+   * Sort merged results by keyword relevance and file depth
+   */
+  private sortResultsByRelevance(mergedResults: MergedSearchResult[]): MergedSearchResult[] {
+    const sortedResults = mergedResults.sort((a, b) => {
+      // Calculate file depth (higher depth = more specific/nested)
+      const depthA = a.file.split('/').length;
+      const depthB = b.file.split('/').length;
+
+      // Scoring: prioritize max unique keywords per line, then total unique keywords in snippet, then file depth
+      const scoreA = (a.maxUniqueKeywordsPerLine * 1000) + (a.allUniqueKeywords.length * 100) + depthA;
+      const scoreB = (b.maxUniqueKeywordsPerLine * 1000) + (b.allUniqueKeywords.length * 100) + depthB;
+
+      // Sort by score (highest first)
+      if (scoreB !== scoreA) {
+        return scoreB - scoreA;
+      }
+
+      // If scores are equal, sort by file path for consistent ordering
+      return a.file.localeCompare(b.file);
+    });
+
+    this.logger.debug('Results sorted by keyword relevance', {
+      scores: sortedResults.map(r => ({
+        file: r.file,
+        maxUniquePerLine: r.maxUniqueKeywordsPerLine,
+        totalUniqueKeywords: r.allUniqueKeywords.length,
+        depth: r.file.split('/').length,
+        score: (r.maxUniqueKeywordsPerLine * 1000) + (r.allUniqueKeywords.length * 100) + r.file.split('/').length
+      }))
+    });
+
+    return sortedResults;
   }
 
   /**
    * Read context around each merged search result
    */
-  private async readContextAroundMatches(mergedResults: MergedSearchResult[]): Promise<string> {
+  private async readContextAroundMatches(mergedResults: MergedSearchResult[], keywords: string[]): Promise<string> {
     const contextSections: string[] = [];
 
-    // Sort results by file depth (reverse order - deepest files first, root files last)
-    const sortedResults = mergedResults.sort((a, b) => {
-      const depthA = a.file.split('/').length;
-      const depthB = b.file.split('/').length;
-      return depthB - depthA; // Reverse order: deeper files first, root files last
-    });
+    // Sort results by relevance: keyword density, unique keywords, then file depth
+    const sortedResults = this.sortResultsByRelevance(mergedResults);
 
     for (const result of sortedResults) {
       try {
@@ -351,8 +420,9 @@ export class PlanExecutorV3 implements PlanExecutor {
           max_lines: result.endLine - result.startLine + 1
         });
 
-        // Format the context nicely
-        const section = `=== ${result.file} (lines ${result.startLine}-${result.endLine}) ===\n${fileContent}\n`;
+        // Format the context with highlighted keyword lines
+        const formattedContent = this.formatContentWithHighlights(fileContent, result.startLine, keywords);
+        const section = `=== ${result.file} (lines ${result.startLine}-${result.endLine}) ===\n${formattedContent}\n`;
         contextSections.push(section);
         
       } catch (error) {
@@ -361,7 +431,148 @@ export class PlanExecutorV3 implements PlanExecutor {
       }
     }
 
-    return contextSections.join('\n');
+    const finalResult = contextSections.join('\n');
+    
+    // Save to debug file
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const tmpPath = path.join(__dirname, '..', '.tmp', 'search-excerpts.txt');
+      fs.writeFileSync(tmpPath, finalResult, 'utf-8');
+      this.logger.debug('Saved search excerpts to debug file', { path: tmpPath });
+    } catch (error) {
+      this.logger.warn('Failed to save search excerpts debug file', { error });
+    }
+
+    return finalResult;
+  }
+
+  /**
+   * Format file content with line numbers, highlighting lines that contain keywords
+   */
+  private formatContentWithHighlights(content: string, startLine: number, keywords: string[]): string {
+    const lines = content.split('\n');
+    const formatted: string[] = [];
+    
+    for (let i = 0; i < lines.length; i++) {
+      const lineNumber = startLine + i;
+      const line = lines[i];
+      
+      // Check if this line contains any of the keywords (case-insensitive)
+      const containsKeyword = keywords.some(keyword => 
+        line.toLowerCase().includes(keyword.toLowerCase())
+      );
+      
+      if (containsKeyword) {
+        // Highlight with line number and arrow
+        formatted.push(`${lineNumber}→ ${line}`);
+      } else {
+        // Pad with spaces to match line number width
+        const padding = ' '.repeat(lineNumber.toString().length + 1); // +1 for the arrow
+        formatted.push(`${padding} ${line}`);
+      }
+    }
+    
+    return formatted.join('\n');
+  }
+
+  /**
+   * Filter snippets by relevance to the user question using fast LLM
+   */
+  private async filterSnippetsByRelevance(userRequest: string, contextualResults: string): Promise<string> {
+    const promptConfig = this.promptManager.getTemplateByPath('v3.snippetFiltering');
+    if (!promptConfig || !promptConfig.template) {
+      this.logger.warn('Snippet filtering prompt not found, returning all results');
+      return contextualResults;
+    }
+
+    // Split contextual results into individual snippets
+    const snippetSections = contextualResults.split(/^=== .* ===$/m).filter(section => section.trim());
+    
+    if (snippetSections.length <= 5) {
+      // If we have 5 or fewer snippets, no need to filter
+      this.logger.debug('5 or fewer snippets found, skipping filtering');
+      return contextualResults;
+    }
+
+    // Trim to maximum of 20 snippets (they are already sorted by relevance, so take the top 20)
+    const trimmedSections = snippetSections.slice(0, 20);
+    
+    if (trimmedSections.length < snippetSections.length) {
+      this.logger.debug('Trimmed snippets for filtering', {
+        original: snippetSections.length,
+        trimmed: trimmedSections.length
+      });
+    }
+
+    // Create numbered snippets without line numbers for filtering (in reverse order)
+    const reversedSections = [...trimmedSections].reverse();
+    const numberedSnippets = reversedSections.map((section, index) => {
+      const lines = section.trim().split('\n');
+      // Remove line number formatting for cleaner presentation
+      const cleanLines = lines.map(line => {
+        // Remove line number arrows and padding
+        return line.replace(/^\s*\d+→\s*/, '').replace(/^\s+/, '  ');
+      });
+      return `${index + 1}. ${cleanLines.join('\n')}`;
+    }).join('\n\n');
+
+    const prompt = this.requestProcessor.replaceTemplateVariables(promptConfig.template, {
+      userRequest: userRequest,
+      snippets: numberedSnippets
+    });
+
+    try {
+      const response = await this.ollamaClient.sendToOllama(
+        prompt,
+        promptConfig.temperature!,
+        promptConfig.maxTokens!,
+        promptConfig.useFastModel!
+      );
+
+      // Parse the JSON response to get selected snippet numbers
+      const selectedNumbers = JSON.parse(response.trim());
+      if (!Array.isArray(selectedNumbers) || selectedNumbers.length === 0) {
+        this.logger.warn('Invalid filtering response, returning all results');
+        return contextualResults;
+      }
+
+      // Map selected numbers back to original sections (accounting for reverse order)
+      const originalSections = contextualResults.split(/(?=^=== .* ===)/m).filter(section => section.trim());
+      const filteredSections = selectedNumbers
+        .map(num => {
+          // Reverse the index since we presented them in reverse order
+          const reverseIndex = reversedSections.length - num;
+          // Find the corresponding section in the original results
+          const targetSection = reversedSections[num - 1];
+          return originalSections.find(section => section.trim() === targetSection.trim());
+        })
+        .filter(section => section);
+
+      const filteredResult = filteredSections.join('\n');
+      
+      // Save filtered snippets to debug file
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const tmpPath = path.join(__dirname, '..', '.tmp', 'filtered-snippets.txt');
+        fs.writeFileSync(tmpPath, filteredResult, 'utf-8');
+        this.logger.debug('Saved filtered snippets to debug file', { path: tmpPath });
+      } catch (error) {
+        this.logger.warn('Failed to save filtered snippets debug file', { error });
+      }
+      
+      this.logger.debug('Snippet filtering completed', {
+        originalSnippets: snippetSections.length,
+        selectedNumbers,
+        filteredSnippets: filteredSections.length
+      });
+
+      return filteredResult || contextualResults; // Fallback if filtering fails
+    } catch (error) {
+      this.logger.warn('Snippet filtering failed, returning all results', { error });
+      return contextualResults;
+    }
   }
 
   /**

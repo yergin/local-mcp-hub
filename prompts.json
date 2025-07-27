@@ -68,6 +68,8 @@
     }
   },
   "v3": {
+    "linesBefore": 5,
+    "linesAfter": 15,
     "intentClassification": {
       "template": "User Request: \"{userRequest}\"\n\nWhat is the user's primary intent?\nA) UNDERSTAND - Learn how something works, get overview, explain functionality\nB) FIND - Locate specific files, code, or information\nC) FIX - Debug issues, solve problems, troubleshoot\nD) BUILD - Implement new features, make changes, create something\nE) CONFIGURE - Set up, modify settings, adjust configuration\n\nRespond with just the letter: A, B, C, D, or E",
       "temperature": 0.1,
@@ -87,13 +89,19 @@
       "useFastModel": true
     },
     "evaluateAndRespond": {
-      "template": "User Question: \"{userRequest}\"\n\nTool Result:\n{toolResult}\n\nEvaluate: Does this tool result contain COMPLETE, SPECIFIC, ACTIONABLE information to fully answer the user's question?\n\nBe extremely strict. You must be able to provide a definitive answer with direct quotes from the tool result as evidence.\n\nIf you have complete information:\n- Start your response with the direct answer\n- Include the exact quote(s) from the tool result that support your answer\n- Format quotes like: \"According to the documentation: '[exact quote here]'\"\n\nIf the information is incomplete, too general, missing key details, or you cannot find specific quotes to support a complete answer:\n- Start your response with exactly \"NEED_MORE_INFO\" (nothing before it)\n- Follow with what specific additional information is needed\n\nRemember: It's better to ask for more information than give an incomplete or uncertain answer.",
+      "template": "User Question: \"{userRequest}\"\n\nTool Result:\n{toolResult}\n\nEvaluate: Does this tool result contain COMPLETE, SPECIFIC, ACTIONABLE information to fully answer the user's question?\n\nBe extremely strict. You must be able to provide a definitive answer with direct quotes from the tool result as evidence.\n\nIf you have complete information:\n- Start your response with the direct answer\n- Include the exact quote(s) and file name(s) it came from from the tool result\n- Include specific implementation details from the quoted file(s) when available\n- Format quotes like: \"According to the code: '[exact quote here]'\"\n\nIf the information is incomplete, too general, missing key details, or you cannot find specific quotes to support a complete answer:\n- Start your response with exactly \"NEED_MORE_INFO\" (nothing before it)\n- Follow with what specific additional information is needed\n\nRemember: It's better to ask for more information than give an incomplete or uncertain answer.",
       "temperature": 0.1,
       "maxTokens": 500,
       "useFastModel": false
     },
     "needMoreInfoResponse": {
       "template": "I found some information, but I need more details to fully answer your question.\n\nWhat I found:\n{partialResult}\n\n{explanation}\n\nWould you like me to look for additional information, or does this partially help?"
+    },
+    "snippetFiltering": {
+      "template": "User Question: \"{userRequest}\"\n\nCode Snippets:\n{snippets}\n\nRank these snippets by relevance to answering the user's question. Consider:\n- Does the snippet contain implementation details that directly answer the question?\n- Is the snippet about the specific functionality mentioned in the question?\n- Does the snippet provide actionable information?\n\nReturn only the TOP 5 most relevant snippets as a JSON array of snippet numbers.\nExample: [18, 25, 7, 42, 12]\n\nResponse:",
+      "temperature": 0.1,
+      "maxTokens": 50,
+      "useFastModel": true
     },
     "fallbackResponse": {
       "template": "I found this information: {toolResult}"
