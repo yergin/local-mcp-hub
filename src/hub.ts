@@ -940,7 +940,7 @@ class LocalMCPHub {
       logger.info(`Connected to Ollama at: ${this.config.ollama.host}`);
 
       // Test Ollama connection on startup
-      this.ollamaClient.testConnection(this.prompts);
+      this.ollamaClient.testConnection(this.promptManager.getData('connectionTest'));
 
       // Initialize MCP tool schemas and keep processes alive
       await this.mcpManager.initializeMCPSchemas();
