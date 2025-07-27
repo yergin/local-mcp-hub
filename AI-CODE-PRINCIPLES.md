@@ -59,6 +59,10 @@ AI Code Principles
 
    6.3 Design simple algorithms, think of optimizations later
 
+   6.4 Check for unused functions and variables and remove them
+
+   6.5 Prefer calculating values to storing redundant members
+
 7. Optimizations
 
    7.1 Only tackle optimization after a working simple algorithm is implemented
