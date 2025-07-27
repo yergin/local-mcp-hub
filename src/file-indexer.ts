@@ -1,10 +1,10 @@
 import winston from 'winston';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { MCPManager } from './mcp-manager';
 
 export interface FileInfo {
-  path: string;
   name: string;
   extension: string;
   type: FileType;
@@ -31,7 +31,7 @@ export interface FileIndex {
   totalFiles: number;
   totalDirectories: number;
   filesByType: Record<FileType, number>;
-  files: FileInfo[];
+  files: Map<string, FileInfo>;
 }
 
 // Fixed-width format definition
@@ -56,6 +56,7 @@ export class FileIndexer {
   private compiledIgnorePatterns: RegExp[] = [];
   private _isReady: boolean = false;
   private buildingPromise: Promise<FileIndex> | null = null;
+  private isCaseSensitive: boolean | null = null;
   
   constructor(mcpManager: MCPManager, logger: winston.Logger, indexPath: string, configPath?: string) {
     this.mcpManager = mcpManager;
@@ -226,12 +227,12 @@ export class FileIndexer {
     // Calculate column widths dynamically
     const typeWidth = Math.max(
       15, // minimum width
-      ...index.files.map(f => f.type.length)
+      ...Array.from(index.files.values()).map(f => f.type.length)
     );
     
     const pathWidth = Math.max(
       40, // minimum width
-      ...index.files.map(f => f.path.length)
+      ...Array.from(index.files.keys()).map(path => path.length)
     );
     
     // Create header with dynamic spacing
@@ -245,14 +246,14 @@ export class FileIndexer {
     lines.push('-'.repeat(header.length));
     
     // Sort files by path for readability
-    const sortedFiles = [...index.files].sort((a, b) => a.path.localeCompare(b.path));
+    const sortedEntries = [...index.files.entries()].sort((a, b) => a[0].localeCompare(b[0]));
     
     // Add file entries
-    for (const file of sortedFiles) {
+    for (const [filePath, fileInfo] of sortedEntries) {
       const row = [
-        file.type.padEnd(typeWidth),
-        file.path.padEnd(pathWidth),
-        file.lastModified
+        fileInfo.type.padEnd(typeWidth),
+        filePath.padEnd(pathWidth),
+        fileInfo.lastModified
       ].join('  ');
       lines.push(row);
     }
@@ -280,7 +281,7 @@ export class FileIndexer {
           [FileType.Asset]: 0,
           [FileType.Unknown]: 0
         },
-        files: []
+        files: new Map()
       };
       
       let headerLine: string | null = null;
@@ -354,14 +355,13 @@ export class FileIndexer {
           
           if (type && path) {
             const fileInfo: FileInfo = {
-              path,
               name: path.split('/').pop() || path,
               extension: path.includes('.') ? path.substring(path.lastIndexOf('.')) : '',
               type: type as FileType,
               lastModified: modified
             };
             
-            index.files.push(fileInfo);
+            index.files.set(path, fileInfo);
           }
         }
       }
@@ -373,38 +373,81 @@ export class FileIndexer {
     }
   }
   
-  public async startBackgroundIndexing(): Promise<void> {
+  public async startBackgroundIndexing(forceRefresh: boolean = false): Promise<void> {
     if (this.buildingPromise) {
       this.logger.debug('Index building already in progress');
       return;
     }
     
-    this.logger.info('Starting background file indexing');
-    this.buildingPromise = this.buildIndex(true).catch(error => {
+    this.logger.info('Starting background file indexing', { forceRefresh });
+    this.buildingPromise = this.buildIndex(forceRefresh).catch(error => {
       this.logger.error('Background indexing failed', { error });
       throw error;
     });
   }
+
+  private async detectCaseSensitivity(): Promise<boolean> {
+    if (this.isCaseSensitive !== null) {
+      return this.isCaseSensitive;
+    }
+
+    try {
+      const testDir = path.join(os.tmpdir(), 'case-test-' + Date.now());
+      fs.mkdirSync(testDir);
+      
+      const file1 = path.join(testDir, 'Test.txt');
+      const file2 = path.join(testDir, 'test.txt');
+      
+      fs.writeFileSync(file1, 'test');
+      const isCaseSensitive = !fs.existsSync(file2);
+      
+      // Cleanup
+      fs.rmSync(testDir, { recursive: true });
+      
+      this.isCaseSensitive = isCaseSensitive;
+      this.logger.debug('Filesystem case sensitivity detected', { isCaseSensitive });
+      return isCaseSensitive;
+    } catch (error) {
+      // Fallback to platform detection
+      this.isCaseSensitive = process.platform === 'linux';
+      this.logger.warn('Failed to detect case sensitivity, using platform fallback', { 
+        error, 
+        fallback: this.isCaseSensitive 
+      });
+      return this.isCaseSensitive;
+    }
+  }
+
   
   public async buildIndex(forceRefresh: boolean = false): Promise<FileIndex> {
+    // Clear in-memory index if forcing refresh
+    if (forceRefresh) {
+      this.index = null;
+    }
+    
     // If already building, wait for that to complete
-    if (this.buildingPromise && !forceRefresh) {
+    if (this.buildingPromise) {
       this.logger.debug('Waiting for existing build to complete');
       return this.buildingPromise;
     }
     
-    // Return cached index if available and not forcing refresh
-    if (!forceRefresh && this.index && this.isIndexFresh()) {
-      this.logger.debug('Using cached file index');
-      return this.index;
+    // Update the index
+    this.buildingPromise = this.performUpdate().catch(error => {
+      this.logger.error('Index update failed', { error });
+      throw error;
+    });
+    
+    return this.buildingPromise;
+  }
+
+  private async performUpdate(): Promise<FileIndex> {
+    this.logger.info('Updating file index');
+    
+    if (!this.mcpManager.areAllProcessesReady) {
+      throw new Error('MCP tools not ready');
     }
     
     try {
-      this.logger.info('Building file index', { forceRefresh });
-      
-      if (!this.mcpManager.areAllProcessesReady) {
-        throw new Error('MCP tools not ready');
-      }
       
       // Get recursive directory listing
       const result = await this.mcpManager.callMCPTool('list_dir', {
@@ -413,7 +456,7 @@ export class FileIndexer {
       });
       const data = JSON.parse(result);
       
-      const files: FileInfo[] = [];
+      const files = new Map<string, FileInfo>();
       const filesByType: Record<FileType, number> = {
         [FileType.Documentation]: 0,
         [FileType.Code]: 0,
@@ -425,39 +468,91 @@ export class FileIndexer {
         [FileType.Asset]: 0,
         [FileType.Unknown]: 0
       };
+
+      let changedCount = 0;
       
-      // Process files
-      if (data.files) {
-        for (const filePath of data.files) {
-          // Skip ignored files
-          if (this.shouldIgnoreFile(filePath)) {
+      // First, check existing files for changes and deletions
+      for (const [oldPath, oldFile] of this.index?.files ?? new Map<string, FileInfo>()) {
+        if (this.shouldIgnoreFile(oldPath)) {
+          continue;
+        }
+
+        if (data.files.includes(oldPath)) {
+          // File still exists, check if modified
+          let currentModified: string;
+          try {
+            const stats = fs.statSync(oldPath);
+            currentModified = stats.mtime.toISOString();
+          } catch (error) {
+            this.logger.warn(`Failed to stat file ${oldPath}`, { error });
             continue;
           }
+
+          if (oldFile.lastModified !== currentModified) {
+            // File modified, reprocess it
+            changedCount++;
+            
+            const fileName = path.basename(oldPath);
+            const extension = path.extname(fileName).toLowerCase();
+            const type = this.classifyFile(oldPath, fileName);
+
+            const fileInfo: FileInfo = {
+              name: fileName,
+              extension,
+              type,
+              lastModified: currentModified
+            };
+
+            files.set(oldPath, fileInfo);
+            filesByType[type]++;
+            
+            this.logger.debug(`Updated file: ${oldPath} (modified)`);
+          } else {
+            // File unchanged, keep existing entry
+            files.set(oldPath, oldFile);
+            filesByType[oldFile.type]++;
+          }
+        } else {
+          // File deleted
+          changedCount++;
+          this.logger.debug(`Removed deleted file: ${oldPath}`);
+        }
+      }
+
+      // Second, check for new files
+      for (const filePath of data.files) {
+        if (this.shouldIgnoreFile(filePath)) {
+          continue;
+        }
+
+        if (!files.has(filePath)) {
+          // New file, process it
+          changedCount++;
           
+          let currentModified: string;
+          try {
+            const stats = fs.statSync(filePath);
+            currentModified = stats.mtime.toISOString();
+          } catch (error) {
+            this.logger.warn(`Failed to stat file ${filePath}`, { error });
+            continue;
+          }
+
           const fileName = path.basename(filePath);
           const extension = path.extname(fileName).toLowerCase();
           const type = this.classifyFile(filePath, fileName);
-          
-          // Get file stats if possible
-          let lastModified = new Date().toISOString();
-          try {
-            // Note: We might need to add a file_info tool to MCP to get stats
-            // For now, we'll use current time as placeholder
-            lastModified = new Date().toISOString();
-          } catch (error) {
-            // Ignore stat errors
-          }
-          
+
           const fileInfo: FileInfo = {
-            path: filePath,
             name: fileName,
             extension,
             type,
-            lastModified
+            lastModified: currentModified
           };
-          
-          files.push(fileInfo);
+
+          files.set(filePath, fileInfo);
           filesByType[type]++;
+          
+          this.logger.debug(`Updated file: ${filePath} (new)`);
         }
       }
       
@@ -472,7 +567,7 @@ export class FileIndexer {
         version: '1.0',
         lastUpdated: new Date().toISOString(),
         projectPath: '.',
-        totalFiles: files.length,
+        totalFiles: files.size,
         totalDirectories,
         filesByType,
         files
@@ -484,9 +579,10 @@ export class FileIndexer {
       // Mark as ready
       this._isReady = true;
       
-      this.logger.info('File index built successfully', {
+      this.logger.info('File index updated successfully', {
         totalFiles: this.index.totalFiles,
         totalDirectories: this.index.totalDirectories,
+        changedFiles: changedCount,
         filesByType: this.index.filesByType
       });
       
@@ -500,37 +596,6 @@ export class FileIndexer {
     }
   }
   
-  private isIndexFresh(): boolean {
-    if (!this.index) return false;
-    
-    // Consider index fresh if less than 5 minutes old
-    const indexAge = Date.now() - new Date(this.index.lastUpdated).getTime();
-    return indexAge < 5 * 60 * 1000;
-  }
-  
-  public async getFilesByType(type: FileType): Promise<FileInfo[]> {
-    const index = await this.buildIndex();
-    return index.files.filter(f => f.type === type);
-  }
-  
-  public async searchFiles(query: string): Promise<FileInfo[]> {
-    const index = await this.buildIndex();
-    const lowerQuery = query.toLowerCase();
-    
-    return index.files.filter(f => {
-      return f.name.toLowerCase().includes(lowerQuery) ||
-             f.path.toLowerCase().includes(lowerQuery);
-    });
-  }
-  
-  public async getChangedFiles(since: string): Promise<FileInfo[]> {
-    const index = await this.buildIndex();
-    const sinceDate = new Date(since);
-    
-    return index.files.filter(f => {
-      return new Date(f.lastModified) > sinceDate;
-    });
-  }
   
   public getIndex(): FileIndex | null {
     return this.index;
@@ -561,22 +626,22 @@ export class FileIndexer {
     const index = await this.buildIndex();
     const typesToInclude = fileTypes || [FileType.Code, FileType.Configuration, FileType.BuildScript];
     
-    const relevantFiles = index.files.filter(f => 
+    const relevantFiles = Array.from(index.files.entries()).filter(([path, f]) => 
       typesToInclude.includes(f.type)
     );
     
     // Group files by type and directory
     const grouped: Record<string, Record<string, string[]>> = {};
     
-    for (const file of relevantFiles) {
-      const dir = path.dirname(file.path);
-      if (!grouped[file.type]) {
-        grouped[file.type] = {};
+    for (const [filePath, fileInfo] of relevantFiles) {
+      const dir = path.dirname(filePath);
+      if (!grouped[fileInfo.type]) {
+        grouped[fileInfo.type] = {};
       }
-      if (!grouped[file.type][dir]) {
-        grouped[file.type][dir] = [];
+      if (!grouped[fileInfo.type][dir]) {
+        grouped[fileInfo.type][dir] = [];
       }
-      grouped[file.type][dir].push(file.name);
+      grouped[fileInfo.type][dir].push(fileInfo.name);
     }
     
     // Build context string

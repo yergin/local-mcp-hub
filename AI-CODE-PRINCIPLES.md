@@ -17,9 +17,11 @@ AI Code Principles
 
    3.2 Assume values are not null unless explicitly designed to be optional
 
+   3.3 Use and expect strict types, don't try to cover for unexpected types
+
 4. No superfluous comments
 
-   4.1 Refrain from adding comments where the code is speaks for itself
+   4.1 Refrain from adding comments where the code speaks for itself
 
    4.2 If a function needs a comment, it probably requires a better name or to be split up into simpler functions
 
@@ -37,8 +39,28 @@ AI Code Principles
 
    5.2 Make functions generic where possible
 
-   5.3 Separation of Concerns: split concerns up at every level into separate modules, files, classes, functions and data structures.
+   5.3 Give specific names to functions to ensure they are not later misused
 
-   5.4 Favour designs that don't use magic numbers and prefer automatically calculated values to configs
+   5.4 Separation of Concerns: split concerns up at every level into separate modules, files, classes, functions and data structures.
 
-   5.5 Be careful to not overfit the design to the test data, make it flexible
+   5.5 Favour designs that don't use magic numbers and prefer automatically calculated values to configs
+
+   5.6 Be careful to not over-fit the design to the test data to avoid hiding future ineffectiveness
+
+   5.7 Implement it properly the first time, no short-cuts or undocumented assumptions
+
+   5.8 Implement specification-compliant, full proof code that handles edge cases - "will work 99% time" is not good enough
+
+6. Minimize maintenance load
+
+   6.1 Implement only what is needed and suggest additions later
+
+   6.2 Refactor duplicated code into reusable functions
+
+   6.3 Design simple algorithms, think of optimizations later
+
+7. Optimizations
+
+   7.1 Only tackle optimization after a working simple algorithm is implemented
+
+   7.2 Minimize converting data structures internally and store data in high-performance structures up-front
