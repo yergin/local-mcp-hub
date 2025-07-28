@@ -124,3 +124,6 @@ __pycache__/
 
 # Continue
 .continue/
+
+# Claude
+.claude/
